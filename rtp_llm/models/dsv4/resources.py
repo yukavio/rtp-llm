@@ -104,9 +104,18 @@ def validate_bound_cache(cache, metadata, *, device):
     planned = opaque_cache_layouts(metadata)
     if cache is None:
         return {"bound": False, "reason": "no_kv_initialization"}
-    expected_tags = list(dict.fromkeys(tag for layer in planned for tag in layer))
+    active_tags = list(dict.fromkeys(tag for layer in planned for tag in layer))
+    expected_tags = metadata.get("allocator_group_tags", active_tags)
+    if len(set(expected_tags)) != len(expected_tags) or not set(active_tags) <= set(
+        expected_tags
+    ):
+        raise ValueError("Invalid preflight allocator group mapping")
     if list(cache.group_tags) != expected_tags or cache.layer_count != len(planned):
-        raise ValueError("Actual cache topology differs from preflight")
+        raise ValueError(
+            "Actual cache topology differs from preflight: "
+            f"tags={list(cache.group_tags)}, layers={cache.layer_count}; "
+            f"expected tags={expected_tags}, layers={len(planned)}"
+        )
     dtypes = {"TYPE_UINT8": torch.uint8, "TYPE_FP32": torch.float32}
     groups = {}
     layer_groups = []
@@ -182,6 +191,7 @@ def validate_bound_cache(cache, metadata, *, device):
     return {
         "bound": True,
         "layers": len(planned),
+        "allocator_group_tags": expected_tags,
         "groups": groups,
         "layer_groups": layer_groups,
     }

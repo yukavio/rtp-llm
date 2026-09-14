@@ -105,6 +105,19 @@ py_test(
 )
 
 py_test(
+    name = "mtp_queries_test",
+    srcs = ["ppu/models/dsv4/test/test_ppu_mtp_queries.py"],
+    main = "ppu/models/dsv4/test/test_ppu_mtp_queries.py",
+    data = [":platform_sources", ":ppu_sources"],
+    deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"],
+    tags = ["gpu", "ppu"],
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
     name = "decode_metadata_graph_test",
     srcs = ["ppu/test/test_decode_metadata_graph.py"],
     main = "ppu/test/test_decode_metadata_graph.py",

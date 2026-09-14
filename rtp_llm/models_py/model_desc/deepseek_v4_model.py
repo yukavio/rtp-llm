@@ -661,10 +661,12 @@ class DeepSeekV4Model(GptModelBase):
         assert self.v4 is not None
         mtp_hidden = None
         mtp_last_hidden_capacity = None
-        if (
-            self.module_build_context is None
-            and Dsv4SharedRuntimeBufferStore.mtp_hidden_requested()
-        ):
+        mtp_hidden_enabled = (
+            Dsv4SharedRuntimeBufferStore.mtp_hidden_requested()
+            if self.module_build_context is None
+            else self._is_speculative
+        )
+        if mtp_hidden_enabled:
             # MTP rows are the pre-hc residual (hc_mult*dim); DSpARK rows are
             # the captured aux features (len(capture_ids)*dim). Target and
             # draft carry the same capture ids in their configs, so both
@@ -712,14 +714,13 @@ class DeepSeekV4Model(GptModelBase):
                 mtp_hidden=mtp_hidden,
             )
         elif self._shared_runtime_buffers is None:
-            # This explicit Prefill contract does not share state with an MTP
-            # model. A process-global subscriber would retain an unrelated
-            # model's weights after its owner is destroyed.
+            # MtpExecutor passes target/draft tensors explicitly. Each model
+            # owns its output storage; unrelated model lifetimes stay isolated.
             self._shared_runtime_buffers = Dsv4SharedRuntimeBufferStore(
                 device=device,
                 dtype=torch.bfloat16,
-                mtp_hidden_enabled=False,
-                mtp_hidden=None,
+                mtp_hidden_enabled=mtp_hidden_enabled,
+                mtp_hidden=mtp_hidden,
             )
         self._shared_runtime_buffers.bind(self.v4)
 

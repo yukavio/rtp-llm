@@ -52,14 +52,34 @@ def _check_execution_options(options, required):
     return SupportResult(True)
 
 
+def _supports_flash_model(metadata):
+    speculative = metadata.get("speculative", False)
+    if speculative and (
+        metadata.get("speculative_type") != "MTP"
+        or metadata.get("gen_num_per_cycle") != 3
+        or metadata.get("role") not in ("PREFILL", "DECODE")
+    ):
+        return False
+    if metadata.get("hidden_size") != 4096:
+        return False
+    if metadata.get("model_type") == "deepseek_v4":
+        return metadata.get("num_layers") == 43
+    return (
+        speculative
+        and metadata.get("model_type") == "deepseek_v4_mtp"
+        and metadata.get("num_layers") == 1
+        and metadata.get("layer_compress_ratios") == [0]
+    )
+
+
 def _supports_ppu_prefill(selection, request, cache_mode):
     metadata = selection.model_metadata
     options = metadata.get("execution_options", {})
     checks = (
         (selection.platform.device_name == "ZW-M890P", "requires ZW-M890P"),
         (
-            metadata.get("model_type") == "deepseek_v4",
-            "requires DeepSeek-V4 target model",
+            _supports_flash_model(metadata),
+            "requires Flash target or its MTP3 SWA draft in PD mode",
         ),
         (
             metadata.get("tp_size") == 4 and metadata.get("world_size") == 4,
@@ -86,8 +106,10 @@ def _supports_ppu_prefill(selection, request, cache_mode):
             "requires TileLang POST without PDL",
         ),
         (not metadata.get("cp_enabled"), "CP is not qualified"),
-        (metadata.get("role") == "PDFUSION", "PD/decode roles are not qualified"),
-        (not metadata.get("speculative"), "MTP/speculation is not qualified"),
+        (
+            metadata.get("role") in ("PDFUSION", "PREFILL"),
+            "requires a Prefill role",
+        ),
         (not metadata.get("cuda_graph"), "graph execution is not qualified"),
         (not metadata.get("reuse_cache"), "prefix reuse is not qualified"),
         (not metadata.get("lora"), "LoRA is not supported by PPU weight layouts"),
@@ -97,10 +119,6 @@ def _supports_ppu_prefill(selection, request, cache_mode):
             f"requires {cache_mode.upper()} indexer cache",
         ),
         (metadata.get("fp8_kv_cache") is True, "requires FP8 KV cache"),
-        (
-            metadata.get("hidden_size") == 4096 and metadata.get("num_layers") == 43,
-            "requires Flash 43-layer/4096 model",
-        ),
     )
     for supported, reason in checks:
         if not supported:
@@ -149,7 +167,10 @@ def supports_ppu_fp4_decode(selection, request):
     comm = metadata.get("moe_communication", {})
     checks = (
         (selection.platform.device_name == "ZW-M890P", "requires ZW-M890P"),
-        (metadata.get("model_type") == "deepseek_v4", "requires DeepSeek-V4"),
+        (
+            _supports_flash_model(metadata),
+            "requires Flash target or its MTP3 SWA draft in PD mode",
+        ),
         (
             tuple(
                 metadata.get(k)
@@ -163,14 +184,9 @@ def supports_ppu_fp4_decode(selection, request):
             metadata.get("cache_geometry", {}).get("kernel_tokens_per_block") == 256,
             "requires 256 raw tokens per kernel block (CSA/Indexer 64, HCA 2)",
         ),
-        (
-            metadata.get("hidden_size") == 4096 and metadata.get("num_layers") == 43,
-            "requires Flash 43-layer/4096 model",
-        ),
         (metadata.get("indexer_cache_mode") == "fp4", "requires FP4 indexer cache"),
         (metadata.get("fp8_kv_cache") is True, "requires FP8 KV cache"),
         (not metadata.get("cp_enabled"), "CP is not supported by this candidate"),
-        (not metadata.get("speculative"), "requires MTP/speculation off"),
         (not metadata.get("reuse_cache"), "prefix reuse is not qualified"),
         (not metadata.get("lora"), "LoRA is not supported by PPU weight layouts"),
         (not metadata.get("eplb"), "EPLB is not qualified"),
@@ -230,7 +246,7 @@ def register_modules(registry):
                     else None
                 ),
                 collective_protocol_id="ppu.dsv4.decode.tp1-dp8-ep8-mxfp4-ll.v1",
-                capabilities={"decode"},
+                capabilities={"decode", "target_verify"},
                 auto_selectable=False,
                 describe_build_requests=(
                     "rtp_llm.models.dsv4.specs:" + describe if describe else None

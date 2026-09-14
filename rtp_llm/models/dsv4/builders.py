@@ -52,7 +52,14 @@ def build_model(*, build_ctx, request, **kwargs):
         )
 
         kwargs["platform_provider"] = DefaultDsv4PlatformProvider()
-    return DeepSeekV4Model(module_build_context=build_ctx, **kwargs)
+    model_cls = DeepSeekV4Model
+    if build_ctx.selection.model_metadata["model_type"] == "deepseek_v4_mtp":
+        from rtp_llm.models_py.model_desc.deepseek_v4_mtp_model import (
+            DeepSeekV4MtpModel,
+        )
+
+        model_cls = DeepSeekV4MtpModel
+    return model_cls(module_build_context=build_ctx, **kwargs)
 
 
 def validate_initialized(model, init_resource, context):

@@ -69,6 +69,32 @@ def metadata_snapshot(model_config, engine_config):
         for desc in layer
         if desc["tag"] == "indexer_kv"
     }
+    indexer_cache_mode = {frozenset({132}): "fp8", frozenset({68}): "fp4"}.get(
+        frozenset(indexer_entries), "unsupported"
+    )
+    # The single SWA draft layer has no Indexer pool. Its allocator contract
+    # still comes from its selected model descriptor, independently of target.
+    if (
+        model_config.model_type == "deepseek_v4_mtp"
+        and int(model_config.num_layers) == 1
+        and list(attn.layer_compress_ratios) == [0]
+        and not indexer_entries
+    ):
+        indexer_cache_mode = declared_indexer_cache_mode(
+            engine_config.module_dispatch
+        ).value
+    allocator_group_tags = list(
+        dict.fromkeys(desc["tag"] for layer in cache_descriptions for desc in layer)
+    )
+    if model_config.model_type == "deepseek_v4_mtp":
+        target_context = engine_config.module_build_context
+        if target_context is None:
+            raise ValueError("Draft cache planning requires target preflight")
+        # CacheConfig::mergeMTPModule preserves the target's group IDs in each
+        # draft projection, including groups with no active draft-layer views.
+        allocator_group_tags = list(
+            target_context.selection.model_metadata["allocator_group_tags"]
+        )
     metadata = {
         "model_type": model_config.model_type,
         "num_layers": int(model_config.num_layers),
@@ -81,14 +107,15 @@ def metadata_snapshot(model_config, engine_config):
         "cp_enabled": bool(pc.prefill_cp_config.is_enabled()),
         "role": pc.role_type.name,
         "speculative": engine_config.sp_config.type != SpeculativeType.NONE,
+        "speculative_type": engine_config.sp_config.type.name,
+        "gen_num_per_cycle": int(engine_config.sp_config.gen_num_per_cycle),
         "cuda_graph": bool(engine_config.hw_kernel_config.enable_cuda_graph),
         "reuse_cache": bool(engine_config.kv_cache_config.reuse_cache),
         "lora": bool(getattr(model_config, "lora_infos", None)),
         "eplb": bool(model_config.eplb_config.enable_eplb()),
-        "indexer_cache_mode": {frozenset({132}): "fp8", frozenset({68}): "fp4"}.get(
-            frozenset(indexer_entries), "unsupported"
-        ),
+        "indexer_cache_mode": indexer_cache_mode,
         "cache_descriptions": cache_descriptions,
+        "allocator_group_tags": allocator_group_tags,
         "cache_geometry": cache_geometry_snapshot(
             model_config,
             engine_config,

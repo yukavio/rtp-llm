@@ -149,12 +149,12 @@ class Dsv4PlanTest(unittest.TestCase):
         )
 
         for ctx, allowed in (
-            (self.context(), "prefill"),
-            (self.decode_context(), "decode"),
+            (self.context(), {"prefill"}),
+            (self.decode_context(), {"decode", "target_verify"}),
         ):
             ctx.prepare([request_for("model", ctx.selection)])
             capabilities = forward_capabilities(ctx.bindings)
-            self.assertEqual(capabilities, frozenset({allowed}))
+            self.assertEqual(capabilities, frozenset(allowed))
             for is_prefill, graph, verify, phase in (
                 (True, False, False, "prefill"),
                 (False, False, False, "decode"),
@@ -166,7 +166,7 @@ class Dsv4PlanTest(unittest.TestCase):
                     has_decode_fmha=graph,
                     is_target_verify=verify,
                 )
-                if phase == allowed:
+                if phase in allowed:
                     validate_forward_phase(capabilities, **args)
                 else:
                     with self.assertRaisesRegex(
@@ -210,6 +210,75 @@ class Dsv4PlanTest(unittest.TestCase):
         ):
             with self.subTest(changed=changed):
                 ctx = self.decode_context(**changed)
+                with self.assertRaisesRegex(ValueError, "No compatible"):
+                    ctx.prepare([request_for("model", ctx.selection)])
+
+    def test_mtp3_target_and_draft_use_separate_complete_plans(self):
+        from rtp_llm.models.dsv4.specs import validate_runtime_role
+
+        for decode in (False, True):
+            model_digests = []
+            for model_type, layers in (("deepseek_v4", 43), ("deepseek_v4_mtp", 1)):
+                digests = set()
+                for rank in range(8 if decode else 4):
+                    changed = dict(
+                        role="DECODE" if decode else "PREFILL",
+                        model_type=model_type,
+                        num_layers=layers,
+                        layer_compress_ratios=[0] if layers == 1 else [4] * 43,
+                        speculative=True,
+                        speculative_type="MTP",
+                        gen_num_per_cycle=3,
+                    )
+                    ctx = (
+                        self.decode_context(rank, **changed)
+                        if decode
+                        else self.context(selection(rank, **changed))
+                    )
+                    digests.add(ctx.prepare([request_for("model", ctx.selection)]))
+                    self.assertEqual(len(ctx.bindings), 1 + 3 * layers)
+                    verify = decode and model_type == "deepseek_v4"
+                    self.assertEqual(
+                        "target_verify"
+                        in ctx.bindings[0].request.required_capabilities,
+                        verify,
+                    )
+                    validate_runtime_role(
+                        ctx.selection.model_metadata,
+                        is_decode_role=decode,
+                        is_speculative=True,
+                    )
+                    with self.assertRaisesRegex(ValueError, "Runtime speculation"):
+                        validate_runtime_role(
+                            ctx.selection.model_metadata,
+                            is_decode_role=decode,
+                            is_speculative=False,
+                        )
+                self.assertEqual(len(digests), 1)
+                model_digests.extend(digests)
+            self.assertNotEqual(*model_digests)
+
+    def test_mtp_contract_rejects_other_proposals_and_draft_geometry(self):
+        valid = dict(
+            model_type="deepseek_v4_mtp",
+            num_layers=1,
+            layer_compress_ratios=[0],
+            speculative=True,
+            speculative_type="MTP",
+            gen_num_per_cycle=3,
+        )
+        for changed in (
+            {"gen_num_per_cycle": 1},
+            {"gen_num_per_cycle": 4},
+            {"speculative_type": "EAGLE3"},
+            {"speculative": False},
+            {"model_type": "deepseek_v4_dspark"},
+            {"num_layers": 43},
+            {"layer_compress_ratios": [4]},
+            {"hidden_size": 2048},
+        ):
+            with self.subTest(changed=changed):
+                ctx = self.decode_context(**{**valid, **changed})
                 with self.assertRaisesRegex(ValueError, "No compatible"):
                     ctx.prepare([request_for("model", ctx.selection)])
 
@@ -292,13 +361,45 @@ class Dsv4PlanTest(unittest.TestCase):
             digests.add(ctx.prepare([request_for("model", ctx.selection)]))
         self.assertEqual(len(digests), 1)
 
+    def test_pd_prefill_plan_keeps_tp_and_forward_contracts(self):
+        from rtp_llm.models.dsv4.specs import (
+            forward_capabilities,
+            validate_forward_phase,
+            validate_runtime_role,
+        )
+
+        digests = set()
+        for rank in range(4):
+            ctx = self.context(selection(rank, role="PREFILL"))
+            digests.add(ctx.prepare([request_for("model", ctx.selection)]))
+            self.assertEqual(len(ctx.bindings), 130)
+            validate_runtime_role(
+                ctx.selection.model_metadata,
+                is_decode_role=False,
+                is_speculative=False,
+            )
+            capabilities = forward_capabilities(ctx.bindings)
+            validate_forward_phase(
+                capabilities,
+                is_prefill=True,
+                has_decode_fmha=False,
+                is_target_verify=False,
+            )
+            with self.assertRaisesRegex(RuntimeError, "does not support decode"):
+                validate_forward_phase(
+                    capabilities,
+                    is_prefill=False,
+                    has_decode_fmha=True,
+                    is_target_verify=False,
+                )
+        self.assertEqual(len(digests), 1)
+
     def test_unqualified_modes_rejected_by_real_predicate(self):
         for change in [
             {"tp_size": 8},
             {"ep_size": 8},
             {"cp_enabled": True},
             {"role": "DECODE"},
-            {"role": "PREFILL"},
             {"speculative": True},
             {"cuda_graph": True},
             {"reuse_cache": True},

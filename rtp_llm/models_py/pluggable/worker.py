@@ -10,7 +10,7 @@ from rtp_llm.models_py.pluggable.spec import canonical_json
 
 
 def prepare_worker_model_context(
-    model_config, engine_config, distributed_server, *, timeout_s
+    model_config, engine_config, distributed_server, *, timeout_s, namespace="target"
 ):
     config = engine_config.module_dispatch
     if config.mode == "legacy":
@@ -42,7 +42,7 @@ def prepare_worker_model_context(
         ctx.verify_protocol(
             lambda digest: verify_store_protocol(
                 distributed_server.store,
-                namespace=f"target-{generation}",
+                namespace=f"{namespace}-{generation}",
                 rank=int(pc.world_rank),
                 ranks=range(int(pc.world_size)),
                 digest=digest,

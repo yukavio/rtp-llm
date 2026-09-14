@@ -86,6 +86,14 @@ class BackendManager(object):
             model_config=model_config,
         )
 
+        # Finalize both models before preflight: speculative configuration can
+        # affect the target's resources as well as the draft's weight layout.
+        propose_model_config = ModelFactory.create_propose_model_config(
+            engine_config=engine_config,
+            model_config=model_config,
+            model_args=self.py_env_configs.model_args,
+        )
+
         if engine_config.module_dispatch.mode != "legacy":
             from rtp_llm.models_py.pluggable.worker import prepare_worker_model_context
 
@@ -96,6 +104,15 @@ class BackendManager(object):
                 timeout_s=self.py_env_configs.distribute_config.dist_comm_timeout
                 or 300,
             )
+            if propose_model_config is not None:
+                engine_config.propose_module_build_context = prepare_worker_model_context(
+                    propose_model_config,
+                    engine_config,
+                    self._distributed_server,
+                    timeout_s=self.py_env_configs.distribute_config.dist_comm_timeout
+                    or 300,
+                    namespace="propose",
+                )
 
         from rtp_llm.device import get_current_device
 
@@ -142,13 +159,6 @@ class BackendManager(object):
                 raise RuntimeError(
                     "use_mori_ep is set but MoriEP wrapper failed to initialize"
                 )
-
-        # Optional propose model config
-        propose_model_config = ModelFactory.create_propose_model_config(
-            engine_config=engine_config,
-            model_config=model_config,
-            model_args=self.py_env_configs.model_args,
-        )
 
         # Finally create engine using the new API
         self.engine = ModelFactory.from_model_configs(

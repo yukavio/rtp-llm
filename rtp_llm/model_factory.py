@@ -190,6 +190,16 @@ class ModelFactory:
             if alias_names and target_model.weight is None:
                 raise RuntimeError("speculative shared-weight owner is not loaded")
 
+            module_kwargs = {}
+            if engine_config.module_dispatch.mode != "legacy":
+                if engine_config.propose_module_build_context is None:
+                    raise RuntimeError(
+                        "Draft module dispatch requires worker preflight before model loading"
+                    )
+                module_kwargs["module_build_context"] = (
+                    engine_config.propose_module_build_context
+                )
+
             gpt_model = model_cls.from_config(
                 model_config=propose_model_config,
                 parallelism_config=engine_config.parallelism_config,
@@ -206,6 +216,7 @@ class ModelFactory:
                 moe_pure_tp_preshard=engine_config.load_config.moe_pure_tp_preshard,
                 weight_alias_owner=target_model if alias_names else None,
                 weight_alias_names=alias_names,
+                **module_kwargs,
             )
             aliased_local_bytes = 0
             for name in alias_names:
@@ -489,6 +500,7 @@ class ModelFactory:
         )
         # Ensure max_seq_len matches main model
         propose_model_config.max_seq_len = model_config.max_seq_len
+        propose_model_config.gen_num_per_cycle = model_config.gen_num_per_cycle
         propose_model_config.quantization = sp_config.quantization
 
         logging.info(
@@ -504,9 +516,22 @@ class ModelFactory:
             profiling_debug_logging_config=engine_config.profiling_debug_logging_config,
             embedding_config=None,  # Propose model doesn't need embedding_config
         )
-        propose_model_cls._apply_kv_cache_config(
-            propose_model_config, engine_config.kv_cache_config
-        )
+        if engine_config.module_dispatch.mode == "legacy":
+            propose_model_cls._apply_kv_cache_config(
+                propose_model_config, engine_config.kv_cache_config
+            )
+        else:
+            adapter = propose_model_cls.get_module_adapter()
+            if adapter is None:
+                raise ValueError(
+                    f"Draft model {propose_model_config.model_type!r} has no module adapter"
+                )
+            adapter.configure_model(
+                propose_model_cls,
+                propose_model_config,
+                engine_config.kv_cache_config,
+                engine_config.module_dispatch,
+            )
         propose_model_cls._post_build_model_config(propose_model_config)
 
         if sp_config.type == SpeculativeType.DSPARK:

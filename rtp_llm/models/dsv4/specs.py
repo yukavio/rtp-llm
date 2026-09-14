@@ -113,6 +113,14 @@ def request_for(kind, selection, layer_id=None):
         path += ".attn"
     elif kind == "moe":
         path += ".ffn"
+    model = selection.model_metadata
+    phases = {"decode" if model.get("role") == "DECODE" else "prefill"}
+    if (
+        model.get("role") == "DECODE"
+        and model.get("speculative")
+        and model.get("model_type") == "deepseek_v4"
+    ):
+        phases.add("target_verify")
     return BuildRequest.create(
         module_id="rtp.dsv4." + kind,
         path=path,
@@ -122,9 +130,7 @@ def request_for(kind, selection, layer_id=None):
             if selection.model_metadata.get("indexer_cache_mode") == "fp4"
             else STATE_FORMAT
         ),
-        required_capabilities={
-            "decode" if selection.model_metadata.get("role") == "DECODE" else "prefill"
-        },
+        required_capabilities=phases,
         metadata=metadata,
     )
 
@@ -133,8 +139,8 @@ def validate_runtime_role(metadata, *, is_decode_role, is_speculative):
     """Check actual delayed-init resources against the preflight role."""
     if bool(is_decode_role) != (metadata.get("role") == "DECODE"):
         raise ValueError("Runtime Decode role differs from the module preflight")
-    if bool(is_speculative) or bool(metadata.get("speculative")):
-        raise ValueError("Runtime speculation is not supported by this module contract")
+    if bool(is_speculative) != bool(metadata.get("speculative")):
+        raise ValueError("Runtime speculation differs from the module preflight")
 
 
 def forward_capabilities(bindings):

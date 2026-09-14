@@ -76,6 +76,7 @@ class EngineConfig:
     # Worker-local construction state, created after device assignment. This is
     # deliberately not serialized through PyEnvConfigs or sent to another rank.
     module_build_context: Any = field(default=None, repr=False)
+    propose_module_build_context: Any = field(default=None, repr=False)
 
     def to_string(self) -> str:
         """Return a formatted string representation of EngineConfig for debugging.

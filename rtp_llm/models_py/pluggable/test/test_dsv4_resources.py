@@ -79,7 +79,10 @@ class CacheResourceTest(unittest.TestCase):
     def cache(self, metadata=None):
         metadata = self.metadata if metadata is None else metadata
         layouts = opaque_cache_layouts(metadata)
-        tags = list(dict.fromkeys(tag for layer in layouts for tag in layer))
+        tags = metadata.get(
+            "allocator_group_tags",
+            list(dict.fromkeys(tag for layer in layouts for tag in layer)),
+        )
         rows = []
         for layer_id, layer in enumerate(layouts):
             views = []
@@ -181,6 +184,35 @@ class CacheResourceTest(unittest.TestCase):
         self.assertEqual(report["groups"]["csa_state"]["entries_per_view"], 12)
         with self.assertRaises(ValueError):
             self.validate(self.cache(metadata))
+
+    def test_draft_projection_preserves_declared_target_group_ids(self):
+        metadata = copy.deepcopy(self.metadata)
+        metadata["allocator_group_tags"] = self.cache().group_tags
+        metadata["num_layers"] = 1
+        metadata["cache_descriptions"] = metadata["cache_descriptions"][:1]
+        metadata["cache_geometry"]["gen_num_per_cycle"] = 3
+        cache = self.cache(metadata)
+        report = self.validate(cache, metadata)
+        self.assertEqual(report["layer_groups"], [["swa_kv"]])
+        self.assertEqual(report["allocator_group_tags"], self.cache().group_tags)
+        self.assertEqual(set(report["groups"]), {"swa_kv"})
+        for mutation in (
+            lambda c: c.group_tags.append("undeclared"),
+            lambda c: c.group_tags.reverse(),
+            lambda c: setattr(c.rows[0][0], "group_id", 1),
+        ):
+            # The declared mapping is immutable; do not alias it in this fixture.
+            cache = self.cache(copy.deepcopy(metadata))
+            mutation(cache)
+            with self.assertRaises(ValueError):
+                self.validate(cache, metadata)
+
+    def test_allocator_mapping_must_cover_every_active_group(self):
+        for tags in (["swa_kv"], ["swa_kv", "swa_kv"]):
+            metadata = copy.deepcopy(self.metadata)
+            metadata["allocator_group_tags"] = tags
+            with self.assertRaisesRegex(ValueError, "allocator group mapping"):
+                self.validate(self.cache(), metadata)
 
     def test_no_kv_repeat_and_resource_replacement_do_not_retain_tensors(self):
         self.assertFalse(self.validate(None)["bound"])

@@ -22,6 +22,7 @@ from ...kernels.cuda.ppu_fp4_indexer import (
     topk_decode,
 )
 from ...kernels.ppu_fp4_indexer_cache import build_decode_plan, build_plans, gather_k
+from .decode_query import slice_compressor_query
 from .ppu_rope_attention import PpuRopeAttention
 
 
@@ -238,6 +239,63 @@ class PpuFP4Indexer(IndexerFP8):
         q_producer_stream=None,
         decode_streams=None,
     ):
+        if x.ndim != 3 or x.shape[1] not in (1, 4):
+            raise ValueError("FP4 Indexer requires Decode or MTP3 verify queries")
+        if x.shape[1] == 1:
+            return self._forward_decode_step(
+                x,
+                qr,
+                start_pos,
+                out_topk_buffer,
+                position_ids,
+                compressor_meta,
+                q_producer_stream=q_producer_stream,
+                decode_streams=decode_streams,
+            )
+        if q_producer_stream is not None or decode_streams is not None:
+            raise ValueError(
+                "Multi-token Indexer requires the sequential attention path"
+            )
+        if compressor_meta is None:
+            raise ValueError("FP4 Indexer verify requires compressor metadata")
+        batch, query_length = x.shape[:2]
+        if not batch:
+            return out_topk_buffer
+        queries = qr.reshape(batch, query_length, -1)
+        output = out_topk_buffer.reshape(batch, query_length, self.index_topk)
+        # Tokens from one request mutate the same state ring. Process query
+        # positions in order, batching independent requests at each position.
+        # This also preserves the pre-rollback state in the speculative ring.
+        for index in range(query_length):
+            meta = slice_compressor_query(compressor_meta, batch, query_length, index)
+            step_output = torch.empty(
+                (batch, 1, self.index_topk),
+                device=x.device,
+                dtype=out_topk_buffer.dtype,
+            )
+            self._forward_decode_step(
+                x[:, index : index + 1].contiguous(),
+                queries[:, index : index + 1].contiguous(),
+                start_pos + index,
+                step_output,
+                meta.positions.reshape(batch, 1),
+                meta,
+            )
+            output[:, index : index + 1].copy_(step_output)
+        return out_topk_buffer
+
+    def _forward_decode_step(
+        self,
+        x,
+        qr,
+        start_pos,
+        out_topk_buffer,
+        position_ids=None,
+        compressor_meta=None,
+        *,
+        q_producer_stream=None,
+        decode_streams=None,
+    ):
         if (q_producer_stream is None) != (decode_streams is None):
             raise ValueError("Indexer overlap requires producer and auxiliary streams")
         if x.ndim != 3 or x.shape[1] != 1:
@@ -404,7 +462,7 @@ class PpuFP4Attention(PpuRopeAttention):
         )
 
     def _forward_decode_body(self, x, attn_metadata):
-        if self._decode_streams is None:
+        if self._decode_streams is None or x.shape[1] != 1:
             return super()._forward_decode_body(x, attn_metadata)
         from .ppu_decode_attention import decode_attention_overlap
 

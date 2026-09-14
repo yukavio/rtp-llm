@@ -20,6 +20,7 @@ def _plans(
     BT_STRIDE: tl.constexpr,
     MAX_BLOCKS: tl.constexpr,
     TOKENS_PER_BLOCK: tl.constexpr,
+    STATE_ENTRIES: tl.constexpr,
     VARLEN: tl.constexpr,
     SEQ_START: tl.constexpr,
     BLOCK: tl.constexpr,
@@ -39,12 +40,12 @@ def _plans(
     buffer_len = tl.minimum(tl.maximum(start - (seq_len - 8), 0), 8)
     for part in tl.static_range(2):
         window = seq_len - 8 + part * 4
-        logical = window // TOKENS_PER_BLOCK
+        logical = (window // TOKENS_PER_BLOCK) % MAX_BLOCKS
         need = valid & (window >= 0) & (buffer_len > part * 4)
         physical = tl.load(
             BT + req * BT_STRIDE + logical, need & (logical < MAX_BLOCKS), 0
         ).to(tl.int32)
-        page = physical * 2 + ((window % 8) // 4)
+        page = physical * (STATE_ENTRIES // 4) + ((window % STATE_ENTRIES) // 4)
         tl.store(C + i * 4 + 2 + part, tl.where(need, page, 0), live)
     tl.store(C + i * 4, tl.where(valid, seq_len, -1), live)
     tl.store(C + i * 4 + 1, i | (buffer_len << 16), live)
@@ -56,8 +57,15 @@ def _plans(
 
 def build_plans(meta, state_bt, state_entries, state_tokens, seq_start):
     n = meta.positions.numel()
-    if n > 65536 or state_entries != 8 or state_tokens % 8:
-        raise ValueError("SG C4 plans require <=65536 rows and an 8-row native ring")
+    if (
+        n > 65536
+        or state_entries not in (8, 12)
+        or state_tokens <= 0
+        or state_tokens % 4
+    ):
+        raise ValueError("SG C4 plans require <=65536 rows and an 8/12-row native ring")
+    if state_bt.ndim != 2 or state_bt.shape[1] == 0:
+        raise ValueError("SG C4 plans require a nonempty state block table")
     varlen = meta.is_batched and meta.seq_start_per_req is not None
     if seq_start is None and not varlen:
         raise ValueError("FP4 Indexer decode is not qualified")
@@ -79,6 +87,7 @@ def build_plans(meta, state_bt, state_entries, state_tokens, seq_start):
             state_bt.stride(0),
             state_bt.shape[1],
             state_tokens,
+            state_entries,
             varlen,
             int(seq_start or 0),
             128,
@@ -99,6 +108,7 @@ def _decode_plans(
     BT_STRIDE: tl.constexpr,
     MAX_BLOCKS: tl.constexpr,
     TOKENS_PER_BLOCK: tl.constexpr,
+    STATE_ENTRIES: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
@@ -113,19 +123,21 @@ def _decode_plans(
     tl.store(PLAN + i * 4 + 1, tl.where(active, write, -1), live)
     for part in tl.static_range(2):
         window = seq - 8 + part * 4
-        block = window // TOKENS_PER_BLOCK
+        block = (window // TOKENS_PER_BLOCK) % MAX_BLOCKS
         need = active & (seq % 4 == 0) & (window >= 0) & (block < MAX_BLOCKS)
         physical = tl.load(BT + req * BT_STRIDE + block, need, 0).to(tl.int32)
-        page = physical * 2 + (window % 8) // 4
+        page = physical * (STATE_ENTRIES // 4) + (window % STATE_ENTRIES) // 4
         tl.store(PLAN + i * 4 + 2 + part, tl.where(need, page, 0), live)
     tl.store(OUT + i, tl.where(active, slots, -1), live)
 
 
 def build_decode_plan(meta, state_bt, state_entries, state_tokens):
-    """Map one token per request onto the native eight-row C4 ring."""
+    """Map one token per request onto native Decode/MTP3 C4 state pages."""
     n = meta.positions.numel()
-    if state_entries != 8 or state_tokens % 8:
-        raise ValueError("FP4 Decode requires an eight-row native state ring")
+    if state_entries not in (8, 12) or state_tokens <= 0 or state_tokens % 4:
+        raise ValueError("FP4 Decode requires an 8/12-row native state ring")
+    if state_bt.ndim != 2 or state_bt.shape[1] == 0:
+        raise ValueError("FP4 Decode requires a nonempty state block table")
     if (
         meta.b_idx.numel() != n
         or meta.state_slots.numel() != n
@@ -147,6 +159,7 @@ def build_decode_plan(meta, state_bt, state_entries, state_tokens):
             state_bt.stride(0),
             state_bt.shape[1],
             state_tokens,
+            state_entries,
             128,
         )
     return plan.view(torch.uint8), slots

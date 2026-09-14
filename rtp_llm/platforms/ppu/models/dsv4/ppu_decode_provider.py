@@ -39,6 +39,11 @@ class PpuDecodeProvider(PpuModuleProvider):
 
         if default_factory is not DSv4DecodeFmhaImplFP8:
             raise ValueError("PPU metadata Graph requires the FP8 Decode factory")
+        config = args[0] if args else kwargs["config"]
+        if config.q_len != 1:
+            # Verify and draft catch-up use the existing multi-token metadata
+            # updater, whose slot mappings include speculative ring entries.
+            return default_factory(*args, **kwargs)
         tables = {}
         for reference in self._decode_attention_refs:
             attention = reference()

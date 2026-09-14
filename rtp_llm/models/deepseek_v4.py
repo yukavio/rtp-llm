@@ -983,21 +983,14 @@ class DeepSeekV4MtpWeight(DeepSeekV4Weight, DeepSeekV3MtpWeight):
                 identity,
             ),
             AtomicWeight(
-                W.v4_mtp_e_proj_s,
-                [CkptWeightInfo("mtp.0.e_proj.scale", identity)],
-                identity,
-            ),
-            AtomicWeight(
                 W.v4_mtp_h_proj_w,
                 [CkptWeightInfo("mtp.0.h_proj.weight", identity)],
                 identity,
             ),
-            AtomicWeight(
-                W.v4_mtp_h_proj_s,
-                [CkptWeightInfo("mtp.0.h_proj.scale", identity)],
-                identity,
-            ),
         ]
+        # V4PerBlockFp8Weight loads each projection with its UE8M0 scale.
+        # A separate AtomicWeight for that scale would load it again in the
+        # compute dtype and overwrite the quantized pair's original bytes.
         return ModelWeightInfo(layer_weights=layer_weights, weights=weights)
 
 
