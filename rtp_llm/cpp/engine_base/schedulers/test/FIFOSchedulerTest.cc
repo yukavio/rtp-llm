@@ -314,6 +314,45 @@ private:
     std::unique_ptr<SchedulerType> scheduler_;
 };
 
+TEST_F(FIFOSchedulerTest, testFakeKeepaliveMicrosecondOverridePreservesLegacyBounds) {
+    auto resources = makeSchedulerResources(
+        test::makeSimpleMhaCacheConfig(1, 4, 1, rtp_llm::DataType::TYPE_FP16, 1, 4), 1);
+    struct Case {
+        const char* milliseconds;
+        const char* microseconds;
+        int expected;
+    };
+    for (const auto& item : std::vector<Case>{{"", "", 10000}, {"3", "", 3000}, {"0", "", 1000},
+                                             {"200", "", 100000}, {"3", "250", 250}, {"3", "0", 100},
+                                             {"3", "200000", 100000}, {"3", "invalid", 3000}}) {
+        SCOPED_TRACE(std::string(item.milliseconds) + "/" + item.microseconds);
+        autil::EnvGuard milliseconds("RTP_FIFO_FAKE_STREAM_POLL_MS", item.milliseconds);
+        autil::EnvGuard microseconds("RTP_FIFO_FAKE_STREAM_POLL_US", item.microseconds);
+        FIFOScheduler scheduler(resources.runtime_config, resources.model_config, PDSepConfig{},
+                                ParallelismConfig{}, resources.cache_manager);
+        EXPECT_EQ(scheduler.fake_stream_poll_us_, item.expected);
+    }
+}
+
+TEST_F(FIFOSchedulerTest, testSubmillisecondFakeKeepaliveStillUsesTimeoutAndNotification) {
+    autil::EnvGuard microseconds("RTP_FIFO_FAKE_STREAM_POLL_US", "100");
+    auto resources = makeSchedulerResources(
+        test::makeSimpleMhaCacheConfig(1, 4, 1, rtp_llm::DataType::TYPE_FP16, 1, 4), 1);
+    ParallelismConfig parallelism;
+    parallelism.dp_size = 2;
+    FIFOScheduler scheduler(resources.runtime_config, resources.model_config, PDSepConfig{},
+                            parallelism, resources.cache_manager);
+    ASSERT_TRUE(scheduler.need_fill_fake_stream_);
+    auto idle = scheduler.schedule();
+    ASSERT_TRUE(idle.ok());
+    EXPECT_TRUE(idle->streams.empty());
+    EXPECT_EQ(scheduler.keepalive_timeout_count_.load(), 1);
+    // A notification predicate must bypass the timed wait, including shutdown.
+    ASSERT_TRUE(scheduler.stop().ok());
+    (void)scheduler.schedule();
+    EXPECT_EQ(scheduler.keepalive_timeout_count_.load(), 1);
+}
+
 TEST_F(FIFOSchedulerTest, testSimple) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
     std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);

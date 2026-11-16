@@ -1131,7 +1131,14 @@ absl::Status NormalEngine::step() try {
     {
         // Both executors drive profiling from actual model-work callbacks,
         // after TP input synchronization has rejected idle steps.
-        RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.execute(stream_size=%zu)", streams.size());
+        // Count only while profiling; DP keepalive streams must not be reported
+        // as active user requests when comparing per-rank decode workloads.
+        RTP_LLM_PROFILE_SCOPE_DYNAMIC(
+            "engine.normal.execute(stream_size=%zu,real_stream_size=%zu)",
+            streams.size(),
+            static_cast<size_t>(std::count_if(streams.begin(), streams.end(), [](const auto& stream) {
+                return stream && !stream->isFakeStream();
+            })));
         status = executor_->process(schedule_output, tps_schedule_time_us);
     }
 

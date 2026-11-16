@@ -127,10 +127,10 @@ private:
     const size_t prefill_cp_size_                = 1;
     // DP keepalive pacing for the pure fake-round wait path: a rank with
     // need_fill_fake_stream_, no running stream and no backlog wakes at this
-    // interval to pace its fake rounds. Env RTP_FIFO_FAKE_STREAM_POLL_MS
-    // (1..100, default 10 = historical quantum) only tightens this path; the
-    // retryable-queue quanta are untouched.
-    const int            fake_stream_poll_ms_     = 10;
+    // interval to pace its fake rounds. RTP_FIFO_FAKE_STREAM_POLL_US (100..100000)
+    // overrides RTP_FIFO_FAKE_STREAM_POLL_MS (1..100, default 10). Only this path
+    // uses the override; retryable-queue quanta and enqueue notification stay unchanged.
+    const int            fake_stream_poll_us_     = 10000;
     std::atomic<int64_t> keepalive_timeout_count_ = 0;
 
     // Consumed (exchanged to 0) from the const fillExtraMetrics() reporting hook.
