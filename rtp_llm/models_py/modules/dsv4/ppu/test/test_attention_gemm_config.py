@@ -1,26 +1,68 @@
 """Guard the EP8 dispatcher while exposing large-EP tiles as an explicit profile."""
+
 import os
 import unittest
 from unittest.mock import patch
 
-from rtp_llm.models_py.kernels.ppu.attention.ppu_attention_gemm import decode_attention_gemm_config
+from rtp_llm.models_py.kernels.ppu.attention.ppu_attention_gemm import (
+    decode_attention_gemm_config,
+)
 
 
 class AttentionGemmConfigTest(unittest.TestCase):
     @patch("deep_gemm.jit_kernels.utils.get_num_sms", return_value=39)
-    def test_d8_keeps_small_shapes_on_the_library_dispatcher(self, _):
+    def test_unqualified_small_shapes_keep_the_library_dispatcher(self, _):
         for ep in (1, 8):
-            for m in (2, 4, 6, 12):
+            for m in (2, 4, 6, 12) if ep == 1 else (2, 4):
                 for n, k in ((32768, 1024), (4096, 8192)):
                     self.assertIsNone(
                         decode_attention_gemm_config(
-                            m, n, k, ep_size=ep, tp_size=1,
+                            m,
+                            n,
+                            k,
+                            ep_size=ep,
+                            tp_size=1,
                             profile="large_ep_full",
                         )
                     )
             self.assertIsNotNone(
                 decode_attention_gemm_config(24, 1024, 4096, groups=8, ep_size=ep)
             )
+
+    @patch("deep_gemm.jit_kernels.utils.get_num_sms", return_value=39)
+    def test_dspark_ep8_tiles_require_exact_topology_and_geometry(self, _):
+        for m in (5, 6, 10, 12, 18, 20, 30):
+            for n, k in ((32768, 1024), (4096, 8192)):
+                got = decode_attention_gemm_config(m, n, k, ep_size=8, tp_size=1)
+                self.assertIsNotNone(got)
+                self.assertIsNone(
+                    decode_attention_gemm_config(m, n, k, ep_size=8, tp_size=2)
+                )
+                self.assertIsNone(decode_attention_gemm_config(m, n, k, ep_size=8))
+                self.assertIsNone(
+                    decode_attention_gemm_config(m, n, k, ep_size=1, tp_size=1)
+                )
+                self.assertIsNone(
+                    decode_attention_gemm_config(
+                        m, n, k, groups=8, ep_size=8, tp_size=1
+                    )
+                )
+        for m in (5, 6, 10):
+            got = decode_attention_gemm_config(
+                m, 1024, 4096, groups=8, ep_size=8, tp_size=1
+            )
+            self.assertEqual(got[1:7], (32, 64, 128, 16, 32, 4))
+        for m in (12, 18, 20, 30, 36, 40, 48):
+            self.assertIsNone(
+                decode_attention_gemm_config(
+                    m, 1024, 4096, groups=8, ep_size=8, tp_size=1
+                )
+            )
+        for m in (36, 40, 48):
+            for n, k in ((32768, 1024), (4096, 8192)):
+                self.assertIsNone(
+                    decode_attention_gemm_config(m, n, k, ep_size=8, tp_size=1)
+                )
 
     @patch("deep_gemm.jit_kernels.utils.get_num_sms", return_value=39)
     def test_large_ep_tiles_need_no_opt_in(self, _):
@@ -42,7 +84,12 @@ class AttentionGemmConfigTest(unittest.TestCase):
         for ep in (16, 32):
             for m in (2, 4, 6, 12):
                 got = decode_attention_gemm_config(
-                    m, 1024, 4096, groups=8, ep_size=ep, tp_size=1,
+                    m,
+                    1024,
+                    4096,
+                    groups=8,
+                    ep_size=ep,
+                    tp_size=1,
                     profile="large_ep_full",
                 )
                 if m == 4 and ep == 32:
@@ -61,13 +108,23 @@ class AttentionGemmConfigTest(unittest.TestCase):
             )
         self.assertIsNone(
             decode_attention_gemm_config(
-                2, 1024, 4096, groups=1, ep_size=16, tp_size=1,
+                2,
+                1024,
+                4096,
+                groups=1,
+                ep_size=16,
+                tp_size=1,
                 profile="large_ep_full",
             )
         )
         self.assertIsNone(
             decode_attention_gemm_config(
-                2, 2048, 4096, groups=8, ep_size=16, tp_size=1,
+                2,
+                2048,
+                4096,
+                groups=8,
+                ep_size=16,
+                tp_size=1,
                 profile="large_ep_full",
             )
         )
@@ -75,16 +132,26 @@ class AttentionGemmConfigTest(unittest.TestCase):
     def test_kernel_ignores_process_environment(self):
         # Topology and the profile are kernel arguments now; a stale shell
         # export must not widen the qualified set.
-        with patch.dict(os.environ, {
-            "EP_SIZE": "32", "TP_SIZE": "1", "DSV4_PPU_WOA_SMALL_TILE": "1",
-        }):
+        with patch.dict(
+            os.environ,
+            {
+                "EP_SIZE": "32",
+                "TP_SIZE": "1",
+                "DSV4_PPU_WOA_SMALL_TILE": "1",
+            },
+        ):
             with patch("deep_gemm.jit_kernels.utils.get_num_sms", return_value=39):
                 self.assertIsNone(
                     decode_attention_gemm_config(2, 1024, 4096, groups=8, ep_size=8)
                 )
                 self.assertIsNotNone(
                     decode_attention_gemm_config(
-                        2, 1024, 4096, groups=8, ep_size=16, tp_size=1,
+                        2,
+                        1024,
+                        4096,
+                        groups=8,
+                        ep_size=16,
+                        tp_size=1,
                         profile="large_ep_full",
                     )
                 )
@@ -102,6 +169,9 @@ class AttentionGemmConfigTest(unittest.TestCase):
     @patch("deep_gemm.jit_kernels.utils.get_num_sms", return_value=20)
     def test_different_sm_allocation_keeps_the_library_dispatcher(self, _):
         self.assertIsNone(decode_attention_gemm_config(4, 4096, 8192, ep_size=32))
+        self.assertIsNone(
+            decode_attention_gemm_config(6, 32768, 1024, ep_size=8, tp_size=1)
+        )
 
 
 if __name__ == "__main__":

@@ -30,6 +30,21 @@ _LARGE_EP_TILES = {
     (1, 4096, 8192): {m: (16, 64, 16, 16, 4) for m in (2, 4, 6, 12)},
 }
 
+# DSpARK draft/verify rows at EP8/TP1. Larger row counts stay on the
+# library dispatcher: smaller tiles regress there despite helping M <= 30.
+_DSPARK_EP8_TILES = {
+    (1, 32768, 1024): {
+        **{m: (16, 128, 16, 32, 3) for m in (5, 10)},
+        **{m: (16, 128, 16, 32, 2) for m in (6, 12)},
+        **{m: (32, 64, 16, 32, 4) for m in (18, 20, 30)},
+    },
+    (1, 4096, 8192): {
+        **{m: (16, 128, 16, 32, 4) for m in (5, 6, 10, 12)},
+        **{m: (32, 64, 16, 32, 4) for m in (18, 20, 30)},
+    },
+    (8, 1024, 4096): {m: (32, 64, 16, 32, 4) for m in (5, 6, 10)},
+}
+
 
 @lru_cache(maxsize=None)
 def _config(tile, k, sms):
@@ -49,6 +64,8 @@ def decode_attention_gemm_config(
     process environment for topology.
     """
     tile = _TILES.get((groups, n, k), {}).get(m)
+    if tile is None and ep_size == 8 and tp_size == 1:
+        tile = _DSPARK_EP8_TILES.get((groups, n, k), {}).get(m)
     if tile is None and ep_size in (16, 32):
         tile = _LARGE_EP_TILES.get((groups, n, k), {}).get(m)
     if (

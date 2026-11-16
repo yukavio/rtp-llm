@@ -279,8 +279,10 @@ class DecodeFusionsTest(unittest.TestCase):
                     sglang_layout=True,
                     quantization="v2_row",
                 )
+            linear._attn_gemm_ep_size = 8
+            linear._attn_gemm_tp_size = 1
             # Include unqualified M values to exercise the normal fallback.
-            for m in (1, 8, 16, 17, 24, 32, 33):
+            for m in (1, 5, 6, 8, 10, 12, 16, 17, 18, 20, 24, 30, 32, 33, 36, 40, 48):
                 shape = (m, k) if groups == 1 else (m, groups, k)
                 x = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
 
