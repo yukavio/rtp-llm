@@ -108,6 +108,29 @@ class PrefillOperatorsTest(unittest.TestCase):
 
 
     @torch.inference_mode()
+    def test_full_chunk_post_tiles_preserve_fallback_and_alias(self):
+        from rtp_llm.models_py.kernels.ppu.hc.post_kernel import mhc_post_fwd
+
+        torch.manual_seed(890434)
+        for rows in (4096, 8192, 16384):
+            residual = torch.empty((1, rows, 4, 4096), device="cuda", dtype=torch.bfloat16)
+            x = torch.empty((1, rows, 4096), device="cuda", dtype=torch.bfloat16)
+            post = torch.randn((1, rows, 4, 1), device="cuda")
+            comb = torch.randn((1, rows, 4, 4), device="cuda")
+            expected, actual = torch.empty_like(residual), torch.empty_like(residual)
+            for magnitude in (1.0, 1e-20, 1e8):
+                with self.subTest(rows=rows, magnitude=magnitude):
+                    x.normal_().mul_(magnitude)
+                    residual.normal_().mul_(magnitude)
+                    mhc_post_fwd(x, residual, post, comb, out=expected, prefill_tuned=False)
+                    mhc_post_fwd(x, residual, post, comb, out=actual, prefill_tuned=True)
+                    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+                    actual.copy_(residual)
+                    returned = mhc_post_fwd(x, actual, post, comb, out=actual, prefill_tuned=True)
+                    self.assertIs(returned, actual)
+                    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    @torch.inference_mode()
     def test_hc_post_repeated_against_exact_reference(self):
         from rtp_llm.models_py.kernels.ppu.hc.post_kernel import mhc_post_fwd
 

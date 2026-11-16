@@ -234,6 +234,11 @@ class PrefillDefaultsTest(unittest.TestCase):
         for rows, tune, hidden, pdl, block in (
             (1024, True, 4096, False, 512),
             (1024, False, 4096, False, 256),
+            (4096, True, 4096, False, 2048),
+            (8192, True, 4096, False, 2048),
+            (16384, True, 4096, False, 2048),
+            (8192, False, 4096, False, 256),
+            (4097, True, 4096, False, 512),
             (1, True, 4096, False, 256),
             (0, True, 4096, False, 256),
             (1024, True, 4096, True, None),

@@ -213,6 +213,10 @@ def mhc_post_fwd(
             # Avoid the TileLang shared-memory staging for the Flash path.
             # Each column tile reads all residual lanes before writing output.
             block = 512 if prefill_tuned and 1024 <= rows <= 65536 else 256
+            # Qualified full-chunk shapes reduce CTA scheduling overhead while
+            # preserving the ordered FP32 contractions and disjoint stores.
+            if prefill_tuned and rows in (4096, 8192, 16384):
+                block = 2048
             _hc_post_sum[(rows, 4096 // block)](
                 x, x, residual, post_layer_mix, comb_res_mix, out,
                 4096, block, FUSE_SUM=False, num_warps=4, enable_fp_fusion=True,
