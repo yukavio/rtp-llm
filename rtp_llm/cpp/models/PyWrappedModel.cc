@@ -1190,7 +1190,7 @@ torch::Tensor PyWrappedModel::computeLogits(const torch::Tensor& hidden) {
                             || kernel.scalar_type() == torch::kFloat32 || kernel.scalar_type() == torch::kFloat64,
                         "native LM head requires floating-point weights");
 #if USING_CUDA
-            if (kernel.scalar_type() == torch::kBFloat16) {
+            if (kernel.scalar_type() == torch::kBFloat16 && !native_lm_head_bf16_output_) {
                 logits = torch_ext::cublas_gemm_bf16_bf16_fp32(hidden.to(torch::kBFloat16), kernel);
             } else
 #endif

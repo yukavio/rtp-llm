@@ -20,6 +20,10 @@ def tp_local_prefill_q_dim(n_heads: int, head_dim: int, tp_size: int) -> int:
 
 
 class PpuDeepSeekV4Model(DeepSeekV4Model):
+    # Match SGLang's checkpoint-native BF16 head: round the projection before
+    # converting logits to FP32 for sampling. DSpARK inherits the same boundary.
+    # An explicitly FP32 head weight still uses its original FP32 projection.
+    native_lm_head_bf16_output = True
 
     def supports_device_attention_metadata(self) -> bool:
         """The opted-in Decode graph path reads lengths and page tables on device.

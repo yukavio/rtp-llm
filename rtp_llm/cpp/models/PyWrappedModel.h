@@ -156,6 +156,7 @@ private:
     // Member variables (formerly inherited from GptModel)
     const rtp_llm::ExecProperties                   device_props_;
     bool                                            device_attention_metadata_{false};
+    bool                                            native_lm_head_bf16_output_{false};
     const DSparkModelRole                           dspark_model_role_;
     const bool                                      track_cache_store_completion_;
     const bool                                      owns_py_model_;
@@ -406,6 +407,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     }
     device_attention_metadata_ = py::hasattr(py_model_, "supports_device_attention_metadata")
                                  && py_model_.attr("supports_device_attention_metadata")().cast<bool>();
+    // Resolve the model's rounding contract once, outside forward/Graph replay.
+    native_lm_head_bf16_output_ = py::hasattr(py_model_, "native_lm_head_bf16_output")
+                                  && py_model_.attr("native_lm_head_bf16_output").cast<bool>();
     // Registration enables the handler; only batches with selected prefill rows invoke it.
     if (py::hasattr(py_model_, "custom_output_handler")) {
         initializeCustomOutput();

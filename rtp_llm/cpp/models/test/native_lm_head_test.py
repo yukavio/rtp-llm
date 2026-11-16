@@ -51,8 +51,10 @@ def reference(hidden, weight, scale=None):
     )[: rows.shape[0]].float()
 
 
-def make_head(weight, scale=None, **kwargs):
+def make_head(weight, scale=None, *, bf16_output=False, **kwargs):
     model = ForwardModel()
+    if bf16_output:
+        model.native_lm_head_bf16_output = True
 
     def forbidden(_):
         raise AssertionError("native LM head called a Python output-head hook")
@@ -65,6 +67,54 @@ def make_head(weight, scale=None, **kwargs):
 class NativeLmHeadTest(unittest.TestCase):
     def setUp(self):
         torch.manual_seed(1543)
+
+    def test_bf16_output_opt_in_preserves_sampling_rounding_boundary(self):
+        # The more precise projection prefers token 1, but BF16 rounds both
+        # logits to 1. The reference's tie therefore selects token 0.
+        weight = torch.zeros(2, 32, device="cuda", dtype=torch.bfloat16)
+        weight[:, 0] = 1
+        weight[1, 1] = 2 ** -10
+        hidden = torch.ones(1, 32, device="cuda", dtype=torch.bfloat16)
+        default = make_head(weight)(hidden, indexes(1), compact=True)["logits"]
+        rounded = make_head(weight, bf16_output=True)(
+            hidden, indexes(1), compact=True
+        )["logits"]
+        self.assertEqual(default.argmax(-1).item(), 1)
+        self.assertEqual(rounded.argmax(-1).item(), 0)
+        self.assertEqual(rounded.dtype, torch.float32)
+        torch.testing.assert_close(rounded, hidden.mm(weight.t()).float(), rtol=0, atol=0)
+
+    def test_bf16_output_opt_in_handles_row_selection_and_other_weight_dtypes(self):
+        for dtype in (torch.bfloat16, torch.float16, torch.float32, torch.float64):
+            weight = torch.randn(128, 32, device="cuda").to(dtype)
+            hidden = torch.randn(6, 32, device="cuda", dtype=torch.bfloat16)
+            runner = make_head(weight, bf16_output=True, vocab_size=127)
+            selected = torch.tensor([5, 0, 2], dtype=torch.int64).pin_memory()
+            actual = runner(hidden, selected, need_all_logits=True)
+            expected = hidden.to(dtype).mm(weight.t()).float()[:, :127]
+            torch.testing.assert_close(actual["all_logits"], expected, rtol=0, atol=0)
+            torch.testing.assert_close(
+                actual["logits"], expected[selected.cuda()], rtol=0, atol=0
+            )
+
+    def test_bf16_output_opt_in_graph_replay_uses_current_hidden(self):
+        weight = torch.randn(128, 4096, device="cuda", dtype=torch.bfloat16)
+        runner = make_head(weight, bf16_output=True)
+        for rows in (1, 5, 6):
+            hidden = torch.randn(rows, 4096, device="cuda", dtype=torch.bfloat16)
+            selected = indexes(rows)
+            for _ in range(3):
+                runner(hidden, selected, compact=True)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                actual = runner(hidden, selected, compact=True)["logits"]
+            pointer = actual.data_ptr()
+            for magnitude in (0.0, 0.01, 1.0, 100.0):
+                hidden.normal_().mul_(magnitude)
+                graph.replay()
+                torch.testing.assert_close(actual, hidden.mm(weight.t()).float(), rtol=0, atol=0)
+                self.assertEqual(actual.data_ptr(), pointer)
+            graph.reset()
 
     def test_converter_preserves_head_format_under_mixed_moe_quantization(self):
         for dtype in (
