@@ -5528,9 +5528,14 @@ class AttentionFP8(nn.Module):
             ti = ti.squeeze(0)
         indices = ti.unsqueeze(1).to(torch.int32)
 
+        kv_for_attention = qkv.kv_full.to(qkv.q.dtype)
+        if kv_for_attention is not qkv.kv_full:
+            # The cache write and this copy are ordered on the current stream.
+            # The independent FP32 source has no consumer in the attention loop.
+            dispose_tensor(qkv.kv_full)
         out = self._flash_mla_sparse_fwd_chunked_projected(
             q=qkv.q,
-            kv=qkv.kv_full.to(qkv.q.dtype).unsqueeze(1),
+            kv=kv_for_attention.unsqueeze(1),
             indices=indices,
             topk_length=meta.topk_length_kv_full,
             freqs_cis=common.freqs_cis,
@@ -5538,7 +5543,7 @@ class AttentionFP8(nn.Module):
             profile_name="dsv4.fp8.attn.swa.flash_mla_kv_full",
         )
         # kv_full has no remaining consumer after all attention chunks drain.
-        dispose_tensor(qkv.kv_full)
+        dispose_tensor(kv_for_attention)
         return out
 
     def _attn_fp8_swa_via_concat(

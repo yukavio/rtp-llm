@@ -12,6 +12,50 @@ from rtp_llm.models_py.modules.dsv4.kv_cache_utils import SWA_KV
 from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.attention import AttentionFP8
 
 
+class KVPrecisionDispatchTest(unittest.TestCase):
+    def test_target_and_commit_only_opt_in_without_changing_shared_models(self):
+        from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.attention import CommitOnlyAttentionFP8
+        from rtp_llm.models_py.modules.dsv4.fp8.attention import (
+            AttentionFP8 as Shared, CommitOnlyAttentionFP8 as SharedCommit,
+        )
+
+        self.assertEqual(AttentionFP8.kv_cache_source_dtype, torch.float32)
+        self.assertEqual(CommitOnlyAttentionFP8.kv_cache_source_dtype, torch.float32)
+        self.assertIsNone(Shared.kv_cache_source_dtype)
+        self.assertIsNone(SharedCommit.kv_cache_source_dtype)
+
+    def test_attention_consumes_bf16_and_releases_independent_fp32_source(self):
+        from rtp_llm.models_py.modules.dsv4.fp8.attention import PrefillQKV
+
+        for dtype in (torch.bfloat16, torch.float32):
+            with self.subTest(source_dtype=dtype):
+                layer = AttentionFP8.__new__(AttentionFP8)
+                torch.nn.Module.__init__(layer)
+                source = torch.full((2, 512), 1.1875, dtype=dtype)
+                qkv = PrefillQKV(qr=torch.empty(2, 1024),
+                                q=torch.empty(2, 1, 512, dtype=torch.bfloat16),
+                                kv_full=source)
+                common = SimpleNamespace(
+                    cp_on=False, topk_idxs=torch.zeros(2, 1, dtype=torch.int32),
+                    swa_meta=SimpleNamespace(topk_length_kv_full=torch.ones(2, dtype=torch.int32)),
+                    freqs_cis=torch.ones(2, 32, dtype=torch.complex64), workspace=None,
+                )
+                expected = torch.ones(2, 4)
+
+                def attend(**kwargs):
+                    kv = kwargs["kv"]
+                    self.assertEqual(kv.dtype, torch.bfloat16)
+                    self.assertEqual(kv.shape, (2, 1, 512))
+                    self.assertTrue(torch.equal(kv, torch.full_like(kv, 1.1875)))
+                    # Check the actual consumer boundary, before attention ends.
+                    self.assertEqual(source.numel(), 0 if dtype == torch.float32 else 1024)
+                    return expected
+
+                layer._flash_mla_sparse_fwd_chunked_projected = attend
+                self.assertIs(layer._attn_fp8_swa_via_kv_full(qkv, common), expected)
+                self.assertEqual(source.numel(), 0)
+
+
 @unittest.skipUnless(is_ppu(), "requires a PPU")
 class KVCachePrecisionTest(unittest.TestCase):
     def setup_case(self):

@@ -1885,6 +1885,8 @@ class AttentionFP8(_BaseAttentionFP8):
             self.wo_b(wo_b_in, out=out)
 
 class CommitOnlyAttentionFP8(_BaseCommitOnlyAttentionFP8):
+    kv_cache_source_dtype = torch.float32
+
     def __init__(
         self,
         layer_id: int,
