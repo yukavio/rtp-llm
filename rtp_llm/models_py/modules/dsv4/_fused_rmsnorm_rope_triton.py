@@ -183,6 +183,7 @@ def fused_rmsnorm_rope(
     out: torch.Tensor | None = None,
     inplace: bool = False,
     group_heads: int | None = None,
+    output_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     """Fused RMSNorm-over-last-dim + partial RoPE on the final ``rope_head_dim`` cols.
 
@@ -196,7 +197,10 @@ def fused_rmsnorm_rope(
                    Mapping: each freq slot covers ``N_tokens // N_freq``
                    consecutive tokens in the ravelled x layout.
 
-    Returns a tensor of the same shape & dtype as ``x``.  By default a new
+    Returns a tensor of the same shape and, by default, dtype as ``x``.
+    ``output_dtype=torch.float32`` retains normalized values for consumers
+    that quantize directly from FP32 registers, without an intermediate cast.
+    By default a new
     output tensor is allocated.  ``out`` can provide a preallocated contiguous
     output buffer, ``out`` may alias ``x``, and ``inplace=True`` writes back
     into ``x``.  ``group_heads`` groups Q-style rows sharing the same frequency
@@ -207,6 +211,9 @@ def fused_rmsnorm_rope(
     assert x.is_contiguous()
     assert freqs_cis.is_contiguous()
     assert not (out is not None and inplace), "out and inplace are mutually exclusive"
+    output_dtype = x.dtype if output_dtype is None else output_dtype
+    assert output_dtype in (x.dtype, torch.float32), "output may only retain or promote precision"
+    assert not inplace or output_dtype == x.dtype, "inplace cannot promote precision"
     orig_shape = x.shape
     D = orig_shape[-1]
     RD = rope_head_dim
@@ -217,10 +224,10 @@ def fused_rmsnorm_rope(
         out_flat = x_flat
     elif out is not None:
         assert out.shape == x.shape
-        assert out.dtype == x.dtype and out.is_cuda and out.is_contiguous()
+        assert out.dtype == output_dtype and out.is_cuda and out.is_contiguous()
         out_flat = out.view(-1, D)
     else:
-        out_flat = torch.empty_like(x_flat)
+        out_flat = torch.empty_like(x_flat, dtype=output_dtype)
     if N == 0:
         return out_flat.view(*orig_shape)
 

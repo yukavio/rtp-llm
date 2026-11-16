@@ -152,7 +152,7 @@ _INPUT_DIM = 512
 
 
 def quantize_and_insert_k_cache(
-    k: torch.Tensor,  # [num_tokens, 512] bf16
+    k: torch.Tensor,  # [num_tokens, 512] bf16 or fp32 quantization source
     k_cache: torch.Tensor,  # [num_blocks, block_size, 584] uint8
     slot_mapping: torch.Tensor,  # [num_tokens] int64; -1 = skip
 ) -> None:
@@ -167,11 +167,13 @@ def quantize_and_insert_k_cache(
     Slots with value ``-1`` are skipped. The caller decides which logical
     blocks are writable by passing a per-token slot mapping; sparse positive
     block-table entries are written just like contiguous tail entries.
+    FP32 sources preserve normalization precision until FP8 quantization;
+    the RoPE tail is always stored as BF16.
     """
     assert (
         k.dim() == 2 and k.shape[1] == _INPUT_DIM
     ), f"K must be [num_tokens, 512], got {tuple(k.shape)}"
-    assert k.dtype == torch.bfloat16, f"K must be bf16, got {k.dtype}"
+    assert k.dtype in (torch.bfloat16, torch.float32), f"K must be bf16 or fp32, got {k.dtype}"
     assert (
         k_cache.dim() == 3 and k_cache.shape[-1] == 584 and k_cache.dtype == torch.uint8
     ), (

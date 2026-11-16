@@ -138,7 +138,8 @@ class DecodeQKVGpuTest(unittest.TestCase):
                     * wq.double()
                 ).bfloat16()
                 expected_k = fused_rmsnorm_rope(
-                    raw[..., 1024:].contiguous(), wk, freqs, 64, eps=1e-6
+                    raw[..., 1024:].contiguous(), wk, freqs, 64, eps=1e-6,
+                    output_dtype=torch.float32,
                 )
                 self.assertTrue(
                     bool(torch.isfinite(qr).all()) and bool(torch.isfinite(kv).all())

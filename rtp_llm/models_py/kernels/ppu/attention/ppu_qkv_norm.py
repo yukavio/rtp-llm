@@ -87,9 +87,9 @@ def _qkv_norm(
                 base_cache = CACHE + block * CACHE_STRIDE
                 data = base_cache + pos * 576
                 scales = base_cache + BLOCK_SIZE * 576 + pos * 8
-                # Preserve the BF16 boundary and the original UE8M0 scale math.
+                # Reference cache quantization consumes FP32 normalized values.
                 # Cache block stride includes optional TMA padding.
-                values = (k_x * k_inv * k_w).to(tl.bfloat16).reshape(8, 64)
+                values = (k_x * k_inv * k_w).reshape(8, 64)
                 amax = tl.maximum(tl.max(tl.abs(values), 1), 1.0e-4)
                 exponent = tl.ceil(tl.log2(amax / 448.0))
                 scale = tl.exp2(exponent)
@@ -119,10 +119,11 @@ def normalize_decode_qkv(
     swa_cache=None,
     slot_mapping=None
 ):
-    """Return contiguous BF16 QR and KV without materializing projection slices.
+    """Return BF16 QR and FP32 KV without materializing projection slices.
 
     The row layout is Flash Q-A 1024 followed by KV 512. The kernel retains
-    FP32 RMSNorm/RoPE arithmetic and the original BF16 consumer boundary.
+    FP32 RMSNorm/RoPE arithmetic through KV cache quantization. The writer
+    rounds only the RoPE portion to BF16; QR retains its BF16 boundary.
     Optional SWA output writes the packed cache in the KV program, skipping
     slot -1 and preserving the standalone writer's invalid-access checks.
     """
@@ -149,7 +150,7 @@ def normalize_decode_qkv(
     if not math.isfinite(eps) or eps <= 0:
         raise ValueError("Merged QKV norm epsilon must be finite and positive")
     q = torch.empty((batch, queries, 1024), dtype=raw.dtype, device=raw.device)
-    kv = torch.empty((batch, queries, 512), dtype=raw.dtype, device=raw.device)
+    kv = torch.empty((batch, queries, 512), dtype=torch.float32, device=raw.device)
     q_fp8, q_scale = None, None
     if quantize_q:
         q_fp8 = torch.empty((rows, 1024), dtype=torch.float8_e4m3fn, device=raw.device)

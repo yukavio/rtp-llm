@@ -347,6 +347,22 @@ py_test(
 )
 
 py_test(
+    name = "kv_cache_precision_test",
+    srcs = ["test_kv_cache_precision.py", "ppu_test_main.py"],
+    main = "ppu_test_main.py",
+    args = ["--devices", "1", "$(location test_kv_cache_precision.py)"],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "PPU-ZW810E", "gpu_count": "1"},
+    data = ["//rtp_llm/models_py:ppu_sources"],
+    deps = [":ppu_test_runtime", "//rtp_llm:device", "//rtp_llm/models_py:models", "//rtp_llm:testlib"],
+    tags = ["PPU-ZW810E"],
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
     name = "q_norm_rope_test",
     srcs = ["test_q_norm_rope.py", "ppu_test_main.py"],
     main = "ppu_test_main.py",
@@ -584,6 +600,7 @@ test_suite(
         ":mtp_queries_test",
         ":decode_hc_norm_test",
         ":q_norm_rope_test",
+        ":kv_cache_precision_test",
         ":decode_moe_output_test",
         ":topk_padding_test",
         ":prefill_optimizations_test",

@@ -489,6 +489,10 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                 context_freqs,
                 int(attn.rope_head_dim),
                 eps=float(attn.eps),
+                output_dtype=(
+                    getattr(attn, "kv_cache_source_dtype", None)
+                    if cp_ctx is None and gathered_positions is None else None
+                ),
             )
             if gathered_positions is not None:
                 from rtp_llm.models_py.distributed.collective_torch import (
@@ -549,6 +553,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                     bsz=context_rows,
                     q_len=1,
                     head_dim=int(attn.head_dim),
+                    source_dtype=getattr(attn, "kv_cache_source_dtype", None) or torch.bfloat16,
                 )
 
     def map_commit_rows(
@@ -724,6 +729,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                 bsz=batch_size,
                 q_len=gamma,
                 head_dim=int(attn.head_dim),
+                source_dtype=getattr(attn, "kv_cache_source_dtype", None) or torch.bfloat16,
             )
 
             global_indices, topk_length = self._build_noncausal_indices(

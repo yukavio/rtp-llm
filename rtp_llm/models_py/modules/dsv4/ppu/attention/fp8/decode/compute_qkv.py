@@ -52,4 +52,5 @@ def decode_compute_kv(attn, x, freqs_cis):
         freqs_cis,
         attn.rope_head_dim,
         eps=attn.eps,
+        output_dtype=torch.float32,
     )

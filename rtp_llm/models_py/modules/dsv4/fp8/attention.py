@@ -822,6 +822,9 @@ class PrefillQKV(NamedTuple):
 
 
 class AttentionFP8(nn.Module):
+    # None preserves the shared implementation's BF16 KV consumer boundary.
+    kv_cache_source_dtype = None
+
     def __init__(
         self,
         layer_id: int,
@@ -2106,6 +2109,7 @@ class AttentionFP8(nn.Module):
             bsz=bsz,
             q_len=q_len,
             head_dim=self.head_dim,
+            source_dtype=self.kv_cache_source_dtype or torch.bfloat16,
         )
 
     def _decode_compressor_meta_from_metadata(
@@ -5254,7 +5258,8 @@ class AttentionFP8(nn.Module):
                 else:
                     kv_in = self._lin(self.wkv, x_3d)
                 return fused_rmsnorm_rope(
-                    kv_in, self.kv_norm, common.freqs_cis, rd, eps=self.eps
+                    kv_in, self.kv_norm, common.freqs_cis, rd, eps=self.eps,
+                    output_dtype=None if common.cp_on else self.kv_cache_source_dtype,
                 )
 
         qr = compute_qr()
@@ -5352,16 +5357,18 @@ class AttentionFP8(nn.Module):
         ):
             return
 
-        k_bf16 = kv_full.reshape(-1, self.head_dim)
-        if k_bf16.dtype != torch.bfloat16:
-            k_bf16 = k_bf16.to(torch.bfloat16)
+        source_dtype = (
+            torch.bfloat16 if common.cp_on
+            else self.kv_cache_source_dtype or torch.bfloat16
+        )
+        k_source = kv_full.reshape(-1, self.head_dim).to(source_dtype)
         with record_function_range("dsv4.fp8.attn.swa.quant_insert"):
             if cp_byte_sliced:
                 cp_ctx = common.cp_ctx
                 assert cp_ctx is not None
                 assert meta.slot_compaction is not None
                 _ins.quantize_and_insert_k_cache_cp_byte_sliced(
-                    k_bf16,
+                    k_source,
                     raw_u8,
                     meta.slot_mapping,
                     full_entries_per_block=self._swa_entries_per_block(),
@@ -5370,7 +5377,7 @@ class AttentionFP8(nn.Module):
                     compaction=meta.slot_compaction,
                 )
             else:
-                _ins.quantize_and_insert_k_cache(k_bf16, packed_3d, meta.slot_mapping)
+                _ins.quantize_and_insert_k_cache(k_source, packed_3d, meta.slot_mapping)
 
     def _flash_mla_sparse_fwd_chunked_projected(
         self,
@@ -5523,7 +5530,7 @@ class AttentionFP8(nn.Module):
 
         out = self._flash_mla_sparse_fwd_chunked_projected(
             q=qkv.q,
-            kv=qkv.kv_full.unsqueeze(1),
+            kv=qkv.kv_full.to(qkv.q.dtype).unsqueeze(1),
             indices=indices,
             topk_length=meta.topk_length_kv_full,
             freqs_cis=common.freqs_cis,

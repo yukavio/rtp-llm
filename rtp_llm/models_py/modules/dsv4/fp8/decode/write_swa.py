@@ -26,6 +26,7 @@ def decode_write_swa_fp8(
     bsz: int,
     q_len: int,
     head_dim: int,
+    source_dtype: torch.dtype = torch.bfloat16,
 ) -> None:
     """Write newly-computed SWA KV into the FP8 584B/slot pool.
 
@@ -35,12 +36,14 @@ def decode_write_swa_fp8(
     ``slot_mapping[i] == -1`` entries are skipped in-kernel, so CUDA-graph
     padding slots at the tail of max-bs buffers don't need a Python-side
     slice.
+    ``source_dtype`` controls the quantization input precision; the shared
+    path defaults to BF16 and the PPU reference path opts into FP32.
     """
     if slot_mapping is None or slot_mapping.numel() == 0 or swa_pool_3d is None:
         return
     kv_flat = kv.reshape(bsz * q_len, head_dim)
-    if kv_flat.dtype != torch.bfloat16:
-        kv_flat = kv_flat.to(torch.bfloat16)
+    if kv_flat.dtype != source_dtype:
+        kv_flat = kv_flat.to(source_dtype)
     slot_mapping = slot_mapping[: bsz * q_len]
 
     assert kv_flat.stride(0) == head_dim and kv_flat.stride(1) == 1, (
