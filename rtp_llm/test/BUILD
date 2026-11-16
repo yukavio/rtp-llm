@@ -238,6 +238,17 @@ py_test(
 )
 
 py_test(
+    name = "pretokenized_input_test",
+    srcs = ["pretokenized_input_test.py"],
+    deps = [
+        "//rtp_llm:sdk",
+        "//rtp_llm:testlib",
+    ],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
     name = "pipeline_test",
     srcs = [
         "pipeline_test.py",

@@ -192,6 +192,7 @@ class Pipeline(object):
             request_id = request_counter.increment()
 
         request_headers = normalize_request_headers(kwargs.pop("headers", None))
+        input_ids = kwargs.pop("input_ids", None)
         generate_config_json = kwargs.pop("generate_config", {})
         generate_config = self.create_generate_config(
             generate_config_json,
@@ -214,7 +215,7 @@ class Pipeline(object):
             else []
         )
 
-        if len(prompt) == 0:
+        if input_ids is None and len(prompt) == 0:
             raise FtRuntimeException(
                 ExceptionType.EMPTY_PROMPT_ERROR,
                 "prompt should have at least one token!",
@@ -224,11 +225,25 @@ class Pipeline(object):
                 ExceptionType.ERROR_INPUT_FORMAT_ERROR,
                 "expect string prompt, actual: " + str(prompt),
             )
-        # 生成式推荐：由开关控制，默认关闭、对非推荐场景零侵入。
-        # 在 tokenizer.encode(prompt) 之前解析及填充 banned_combo_token_ids，
-        # 避免重复编码 prompt。
-        parse_and_fill_banned_combo(prompt, generate_config, self.tokenizer)
-        token_ids = self.tokenizer.encode(prompt)
+        if input_ids is not None:
+            if prompt or mm_inputs or generate_config.auto_parse_banned_combo:
+                raise FtRuntimeException(
+                    ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                    "input_ids requires text-only input without prompt parsing",
+                )
+            if not isinstance(input_ids, list) or not input_ids or any(
+                type(token) is not int or not 0 <= token < len(self.tokenizer)
+                for token in input_ids
+            ):
+                raise FtRuntimeException(
+                    ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                    "input_ids must be a nonempty list of integer token IDs within the vocabulary",
+                )
+            token_ids = input_ids.copy()
+        else:
+            # Parse recommendation constraints before encoding the text prompt.
+            parse_and_fill_banned_combo(prompt, generate_config, self.tokenizer)
+            token_ids = self.tokenizer.encode(prompt)
 
         # Prompt scoring constraints (max_new_tokens=1, non-streaming, no reuse/PD-sep) are
         # already enforced by validate() → enforce_prompt_scoring_constraints() during config creation.

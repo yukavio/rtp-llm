@@ -120,6 +120,15 @@ class RequestExtractor:
         return self._format_chat_api_messages(generate_config, remain_kwargs)
 
     def _get_text(self, kwargs: Dict[str, Any]):
+        if "input_ids" in kwargs:
+            if any(key in kwargs for key in ("prompt", "text", "prompt_batch", "messages")):
+                raise FtRuntimeException(
+                    ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                    "input_ids cannot be combined with a text prompt or batch",
+                )
+            # Keep input_ids in the remaining arguments for the pipeline. An
+            # empty text placeholder preserves the single-request dispatch path.
+            return [""]
         input_texts: Optional[Union[List[str], List[List[Dict[str, str]]]]] = None
         if "prompt_batch" in kwargs:
             input_texts = kwargs.pop("prompt_batch")

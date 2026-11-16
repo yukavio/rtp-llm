@@ -249,6 +249,28 @@ bazelisk test  rtp_llm/cpp/multimodal_processor/test:multimodal_processor_test  
 
 ## Debug Running Server
 
+The raw generation endpoint (`POST /`) also accepts a single pretokenized
+request using `input_ids` instead of `prompt`:
+
+```json
+{
+  "input_ids": [123, 456],
+  "generate_config": {
+    "max_new_tokens": 16,
+    "top_k": 1,
+    "return_input_ids": true,
+    "return_output_ids": true
+  }
+}
+```
+
+Use IDs from the deployed model's tokenizer. The server preserves their exact
+order without decoding and re-encoding them. IDs must be nonnegative integers
+within the tokenizer vocabulary; the list must not be empty. This input form
+cannot be combined with a text prompt, prompt batch, chat messages, multimodal
+inputs, or automatic parsing of recommendation constraints from prompt text.
+Streaming and PD separation use the same generation configuration as text input.
+
 To retrieve debugging information via a curl request, use the following command with verbose output:
 
 Enabling aux_info: true and debug_info: true in the request will return additional auxiliary information and debugging details.
