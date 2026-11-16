@@ -31,7 +31,8 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
                                                     const torch::Tensor& temperature,
                                                     const torch::Tensor& markov_w1,
                                                     const torch::Tensor& markov_w2,
-                                                    size_t               draft_vocab_size) const {
+                                                    size_t               draft_vocab_size,
+                                                    bool                 all_greedy) const {
     RTP_LLM_PROFILE_SCOPE("speculative_sampler.sample_dspark_draft");
     RTP_LLM_CHECK_WITH_INFO(temperature.defined() && temperature.is_cuda() && temperature.is_contiguous()
                                 && temperature.scalar_type() == torch::kFloat32 && temperature.dim() == 1,
@@ -47,9 +48,12 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
                             "DSpARK anchors must be a CUDA tensor with one token per request");
 
     auto previous_tokens = anchors.reshape({batch_size}).to(torch::kLong);
-    auto all_probabilities =
-        torch::empty({batch_size, static_cast<int64_t>(propose_step_), static_cast<int64_t>(draft_vocab_size)},
-                     torch::TensorOptions().dtype(torch::kFloat32).device(base_logits.device()));
+    torch::Tensor all_probabilities;
+    if (!all_greedy) {
+        all_probabilities =
+            torch::empty({batch_size, static_cast<int64_t>(propose_step_), static_cast<int64_t>(draft_vocab_size)},
+                         torch::TensorOptions().dtype(torch::kFloat32).device(base_logits.device()));
+    }
     std::vector<torch::Tensor> token_columns;
     token_columns.reserve(propose_step_);
     // lm_head shards are padded to a TP alignment before gather. Sampling
@@ -65,17 +69,23 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
         auto markov_bias      = torch::mm(markov_embedding, markov_w2.transpose(0, 1)).to(torch::kFloat32);
         auto logits           = proposal_logits.select(1, step) + markov_bias;
 
-        // Draft q applies request temperature only. Materialize that exact
-        // dense distribution once, sample from it with FlashInfer, and pass
-        // the same q to rejection sampling. Request top-k/top-p stay target-side.
-        logits.div_(temperature_column);
-        auto sampling_probabilities = torch::softmax(logits, -1);
-        auto sampled_draft_tokens   = execSampleFromProbs(sampling_probabilities).to(torch::kInt32);
+        torch::Tensor sampled_draft_tokens;
+        if (all_greedy) {
+            // Greedy verification only accepts an exact token match. Token IDs
+            // represent the point mass without allocating a dense one-hot q.
+            sampled_draft_tokens = logits.argmax(-1).to(torch::kInt32);
+        } else {
+            // Mixed/stochastic batches retain the exact temperature-only q.
+            // Request top-k/top-p stay target-side.
+            logits.div_(temperature_column);
+            auto sampling_probabilities = torch::softmax(logits, -1);
+            sampled_draft_tokens = execSampleFromProbs(sampling_probabilities).to(torch::kInt32);
+            all_probabilities.select(1, step).copy_(sampling_probabilities);
+        }
         auto sampled_target_tokens  = sampled_draft_tokens;
         if (d2t_map_.defined()) {
             sampled_target_tokens = d2t_map_.index_select(0, sampled_draft_tokens.to(torch::kLong)).to(torch::kInt32);
         }
-        all_probabilities.select(1, step).copy_(sampling_probabilities);
         token_columns.push_back(sampled_target_tokens);
         previous_tokens = sampled_target_tokens.to(torch::kLong);
     }
@@ -83,7 +93,7 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
     SamplerOutput output;
     output.token_ids                = torch::stack(token_columns, 1).contiguous();
     output.all_probs                = std::move(all_probabilities);
-    output.token_ids_are_point_mass = false;
+    output.token_ids_are_point_mass = all_greedy;
     return output;
 }
 

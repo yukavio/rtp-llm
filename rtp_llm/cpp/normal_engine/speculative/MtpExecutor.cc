@@ -2522,6 +2522,7 @@ SamplerOutput MtpExecutor::sampleDSparkDraft(const StreamGroups&  stream_groups,
     auto*           temperatures         = temperature_cpu.data_ptr<float>();
     int64_t         row                  = 0;
     constexpr float kMinDraftTemperature = 1.0e-6f;
+    bool            all_greedy           = true;
     for (const auto& stream : stream_groups.allStreams()) {
         // DSpARK admission is configuration-defined. needTilingForSampling()
         // consults mutable output-token history and must not be called while
@@ -2542,11 +2543,12 @@ SamplerOutput MtpExecutor::sampleDSparkDraft(const StreamGroups&  stream_groups,
         // request temperature.
         temperatures[row++] =
             config->stochastic() ? std::max(config->temperature, kMinDraftTemperature) : kMinDraftTemperature;
+        all_greedy = all_greedy && !config->stochastic();
     }
     buffer_holder_.hold_host(temperature_cpu);
     auto temperature = temperature_cpu.to(base_logits.device(), /*non_blocking=*/true);
     return speculative_sampler_->sampleDSparkDraft(
-        base_logits, anchors, temperature, dspark_markov_w1_, dspark_markov_w2_, draft_vocab_size_);
+        base_logits, anchors, temperature, dspark_markov_w1_, dspark_markov_w2_, draft_vocab_size_, all_greedy);
 }
 
 void MtpExecutor::runDSparkProposal(GptModelInputs&              proposal_input,

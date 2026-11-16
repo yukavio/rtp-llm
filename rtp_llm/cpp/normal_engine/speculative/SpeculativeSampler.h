@@ -62,12 +62,15 @@ public:
                                              SamplerOutput&                   draft_sampler_output,
                                              SamplerOutput&                   target_sampler_output);
 
+    // all_greedy is a host-side decision from every request's sampling config.
+    // Mixed batches retain dense q; all-greedy batches return implicit point masses.
     SamplerOutput sampleDSparkDraft(const torch::Tensor& base_logits,
                                     const torch::Tensor& anchors,
                                     const torch::Tensor& temperature,
                                     const torch::Tensor& markov_w1,
                                     const torch::Tensor& markov_w2,
-                                    size_t               draft_vocab_size) const;
+                                    size_t               draft_vocab_size,
+                                    bool                 all_greedy = false) const;
 
 private:
     void batchSample(SpeculativeSamplerOutput&        sample_output,

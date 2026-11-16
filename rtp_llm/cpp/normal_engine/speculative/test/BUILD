@@ -103,7 +103,14 @@ cc_test(
     ]),
     visibility = ["//visibility:public"],
     args = select({
-        "@//:using_ppu": ["--gtest_filter=MtpExecutorTest.testMultiBatchDecode"],
+        "@//:using_ppu": [
+            "--gtest_filter=" +
+            "MtpExecutorTest.testMultiBatchDecode:" +
+            "MtpExecutorTest.testDSparkDraft*:" +
+            "MtpExecutorTest.testDSparkGreedyMappedMarkovChainIgnoresPaddingAndBreaksTies:" +
+            "MtpExecutorTest.testDSparkMixedGreedyAndStochasticBatchRetainsDenseQ:" +
+            "MtpExecutorTest.testDSparkReducedVocabFeedsMappedTargetTokenIntoMarkovChain",
+        ],
         "//conditions:default": [],
     }),
     data = [],
