@@ -5283,6 +5283,11 @@ class AttentionFP8(nn.Module):
             kv_full=kv_full.squeeze(0),
         )
 
+    def _normalize_q_rope(self, q, freqs_cis, rope_head_dim, *, out=None):
+        return fused_rmsnorm_rope(
+            q, None, freqs_cis, rope_head_dim, eps=self.eps, out=out
+        )
+
     def _materialize_prefill_q(
         self, qkv: PrefillQKV, common: PrefillMeta
     ) -> PrefillQKV:
@@ -5308,8 +5313,8 @@ class AttentionFP8(nn.Module):
             )
             assert q_local_flat.data_ptr() == q_out.data_ptr()
             q_local = q_local_flat.view(1, seqlen, self.n_heads, self.head_dim)
-            q_local = fused_rmsnorm_rope(
-                q_local, None, common.freqs_cis, common.rd, eps=self.eps, out=q_local
+            q_local = self._normalize_q_rope(
+                q_local, common.freqs_cis, common.rd, out=q_local
             )
         return qkv._replace(q=q_local.squeeze(0))
 

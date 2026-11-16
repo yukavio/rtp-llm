@@ -119,6 +119,11 @@ def _v4_fp8_linear(w: torch.Tensor, s: torch.Tensor, *, platform_provider=None):
 class AttentionFP8(_BaseAttentionFP8):
     prefill_fast_protocol = "dsv4.fp8-attention.v1"
 
+    def _normalize_q_rope(self, q, freqs_cis, rope_head_dim, *, out=None):
+        from rtp_llm.models_py.kernels.ppu.attention.ppu_q_norm_rope import q_norm_rope
+
+        return q_norm_rope(q, freqs_cis, rope_head_dim, eps=self.eps, out=out)
+
     def __init__(
         self,
         layer_id: int,

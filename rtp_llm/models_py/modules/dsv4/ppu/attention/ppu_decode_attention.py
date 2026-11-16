@@ -123,14 +123,14 @@ def decode_attention_overlap(attn, x, metadata, streams, *, input_quantized=None
         if q_quantized is None:
             q = decode_compute_q_b(attn, qr, freqs)
         else:
-            from rtp_llm.models_py.modules.dsv4.fp8.decode.compute_qkv import (
-                fused_rmsnorm_rope,
+            from rtp_llm.models_py.kernels.ppu.attention.ppu_q_norm_rope import (
+                q_norm_rope,
             )
 
             q = attn.wq_b.forward_quantized(*q_quantized).view(
                 bsz, q_len, attn.n_heads, attn.head_dim
             )
-            q = fused_rmsnorm_rope(q, None, freqs, attn.rope_head_dim, eps=attn.eps)
+            q = q_norm_rope(q, freqs, attn.rope_head_dim, eps=attn.eps)
     finally:
         # Also join partially submitted work before the caller unbinds pools
         # or releases intermediates after an exception.

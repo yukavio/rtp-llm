@@ -7,6 +7,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.decode.compute_qkv import (
 from typing import TYPE_CHECKING, NamedTuple
 import torch
 from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_rope_triton import fused_rmsnorm_rope
+from rtp_llm.models_py.kernels.ppu.attention.ppu_q_norm_rope import q_norm_rope
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.attention import AttentionFP8
@@ -42,7 +43,7 @@ def decode_compute_q_b(attn, qr, freqs_cis):
     q = attn._lin(attn.wq_b, qr).unflatten(
         -1, (attn.n_heads, attn.head_dim)
     )  # [B, S, H, D]
-    return fused_rmsnorm_rope(q, None, freqs_cis, attn.rope_head_dim, eps=attn.eps)
+    return q_norm_rope(q, freqs_cis, attn.rope_head_dim, eps=attn.eps)
 
 def decode_compute_kv(attn, x, freqs_cis):
     return fused_rmsnorm_rope(
