@@ -85,9 +85,10 @@ class Dsv4ConfigTest(unittest.TestCase):
         self.config.dspark_target_layer_ids = [40, 41, 42]
         self.config.gen_num_per_cycle = 5
         self.build()
-        with patch.object(self.config, "gen_num_per_cycle", 9):
-            with self.assertRaisesRegex(ValueError, "speculative depth"):
-                self.build()
+        for gamma in (6, 7, 8, 9):
+            with self.subTest(gamma=gamma), patch.object(self.config, "gen_num_per_cycle", gamma):
+                with self.assertRaisesRegex(ValueError, "speculative depth"):
+                    self.build()
 
     def test_dspark_draft_rejects_deep_compressed_ratio(self):
         self.config.model_type = "deepseek_v4_dspark"
@@ -104,9 +105,11 @@ class Dsv4ConfigTest(unittest.TestCase):
         self.config.gen_num_per_cycle = 5
         self.assertEqual(self.build().execution_options,
                          self.module.PREFILL_EXECUTION_OPTIONS)
-        self.config.gen_num_per_cycle = 9
-        with self.assertRaisesRegex(ValueError, "speculative depth"):
-            self.build()
+        for gamma in (6, 7, 8, 9):
+            with self.subTest(gamma=gamma):
+                self.config.gen_num_per_cycle = gamma
+                with self.assertRaisesRegex(ValueError, "speculative depth"):
+                    self.build()
 
     def test_decode_ep1_rejected_for_single_and_multiple_tp_ranks(self):
         self.parallel.role_type.name = "DECODE"

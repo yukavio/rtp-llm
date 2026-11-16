@@ -355,13 +355,22 @@ class DsparkQ6NumericTest(unittest.TestCase):
             x = self._hc_input(3, q)
             flat = x.reshape(-1, HC_MULT, DIM)
             perm = torch.randperm(flat.shape[0])
-            y_a, post_a, comb_a, _ = ppu_hc_pre(
-                x, self.fn, self.scale, self.base, self.norm_weight
+            mixes, sq = ppu_prenorm(x, self.fn)
+            perm_mixes, perm_sq = ppu_prenorm(flat[perm], self.fn)
+            # CPU BLAS can choose a different accumulation order after a row
+            # permutation. Check that boundary with the same bounds as the
+            # rowwise GEMM test, then freeze its outputs to test the row-local
+            # tail without attributing BLAS rounding to the PPU kernel.
+            with self.subTest(q=q, stage="prenorm"):
+                self.assertLess((mixes[perm] - perm_mixes).abs().max().item(), 1e-5)
+                self.assertLess((sq[perm] - perm_sq).abs().max().item(), 1e-2)
+            y_a, post_a, comb_a, _ = ppu_hc_pre_from_mixes(
+                mixes, sq, x, self.scale, self.base, self.norm_weight
             )
-            y_p, post_p, comb_p, _ = ppu_hc_pre(
-                flat[perm], self.fn, self.scale, self.base, self.norm_weight
+            y_p, post_p, comb_p, _ = ppu_hc_pre_from_mixes(
+                mixes[perm], sq[perm], flat[perm], self.scale, self.base, self.norm_weight
             )
-            with self.subTest(q=q):
+            with self.subTest(q=q, stage="tail"):
                 _assert_close_ulp(self, y_a[perm], y_p, 1, f"q{q} y")
                 _assert_close_ulp(self, post_a[perm], post_p, 1, f"q{q} post")
                 _assert_close_ulp(self, comb_a[perm], comb_p, 3, f"q{q} comb")

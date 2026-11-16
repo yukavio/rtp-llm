@@ -109,6 +109,33 @@ py_test(
     data = ["//rtp_llm/models_py:modules/dsv4/ppu/manifest.py"],
 )
 
+# CPU contracts read production sources without importing PPU native modules.
+_DSPARK_CPU_TESTS = [
+    "dspark_draft_platform", "dspark_index_geometry", "dspark_q6_numeric", "dspark_swa_pd_contract",
+]
+
+[py_test(
+    name = name + "_test",
+    srcs = ["test_" + name + ".py"],
+    main = "test_" + name + ".py",
+    data = [
+        "//rtp_llm:models/deepseek_v4.py",
+        "//rtp_llm/models_py:model_desc/deepseek_v4_dspark_model.py",
+        "//rtp_llm/models_py:model_desc/deepseek_v4_ppu/dspark_model.py",
+        "//rtp_llm/models_py:kernels/ppu/attention/ppu_fp4_indexer_cache.py",
+        "//rtp_llm/models_py:kernels/ppu/attention/ppu_qkv_norm.py",
+        "//rtp_llm/models_py:kernels/ppu/hc/pre_big_fuse_kernel.py",
+        "//rtp_llm/models_py:kernels/ppu/hc/ppu_hc_pre_quant.py",
+        "//rtp_llm/models_py:kernels/ppu/hc/post_kernel.py",
+        "//rtp_llm/models_py:kernels/ppu/moe/ppu_gate_padding.py",
+        "//rtp_llm/models_py:modules/dsv4/ppu/hc/ppu_hc_prenorm.py",
+        "//rtp_llm/models_py:modules/dsv4/ppu/attention/ppu_decode_attention.py",
+        "//rtp_llm/models_py:modules/dsv4/fp8/decode/_fused_prepare_meta_triton.py",
+        "//rtp_llm/models_py:modules/factory/fused_moe/utils/fp8_fp4/gate.py",
+    ],
+    deps = [] if name == "dspark_draft_platform" else ["//rtp_llm:torch"],
+) for name in _DSPARK_CPU_TESTS]
+
 py_test(
     name = "fp8_contract_test",
     srcs = ["test_fp8_contracts.py"],
@@ -247,7 +274,7 @@ _COMMON_CONTRACT_TESTS = [
 test_suite(
     visibility = ["//visibility:public"],
     name = "dsv4_ppu_runtime_contracts",
-    tests = _COMMON_CONTRACT_TESTS + [":" + name for name in _PPU_CONTRACT_TESTS] + [
+    tests = _COMMON_CONTRACT_TESTS + [":" + name for name in _PPU_CONTRACT_TESTS] + [":" + name + "_test" for name in _DSPARK_CPU_TESTS] + [
         "//rtp_llm/cpp/normal_engine/speculative/test:mtp_executor_test",
         ":fp4_indexer_request_slices_test",
         ":decode_moe_hint_test", ":decode_shared_schedule_test",

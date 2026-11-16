@@ -97,7 +97,8 @@ def build_provider(model_config, parallelism, moe_config, max_generate_batch_siz
     dspark = model_config.model_type == "deepseek_v4_dspark" or bool(
         getattr(model_config, "dspark_target_layer_ids", None)
     )
-    max_depth = 8 if dspark else 3
+    # Target verification consumes gamma+1 rows; PPU kernels support Q <= 6.
+    max_depth = 5 if dspark else 3
     if not 0 <= model_config.gen_num_per_cycle <= max_depth:
         raise ValueError(
             f"PPU DSV4 supports {model_config.model_type} speculative depth "
