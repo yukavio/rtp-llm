@@ -4,17 +4,16 @@ import logging
 from functools import partial
 
 import torch
-from rtp_llm.models_py.kernels.ppu.moe.ppu_shared_swiglu import silu_mul_merged_bf16
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
+from rtp_llm.models_py.kernels.ppu.moe.ppu_moe_combine import combine_tp_partials
+from rtp_llm.models_py.kernels.ppu.moe.ppu_shared_swiglu import silu_mul_merged_bf16
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.ppu.moe.gate import PpuGate as Gate
+from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_grouped_fp4 import PpuGroupedFP4Strategy
 from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_moe_config import PpuMoeConfig as MoeCfg
+from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_shared_expert import PpuTPSharedExpert
 from rtp_llm.utils.model_weight import W
 from torch import nn
-
-from rtp_llm.models_py.kernels.ppu.moe.ppu_moe_combine import combine_tp_partials
-from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_grouped_fp4 import PpuGroupedFP4Strategy
-from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_shared_expert import PpuTPSharedExpert
 
 
 class PpuTPMoE(nn.Module):
@@ -94,14 +93,21 @@ class PpuTPMoE(nn.Module):
             max_tokens_per_rank=self.max_tokens_per_rank,
             tp_size=tp_size,
         )
-        self._strategy = PpuGroupedFP4Strategy(
-            cfg,
-            sglang_moe=True,
-            fused_gather=True,
-            fused_scale_gather=platform_provider._bool(
-                "DSV4_MOE_SCALE_GATHER_FUSED", True
-            ),
-        )
+        if getattr(platform_provider, "_moe_activation", "fp4") == "fp8":
+            from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_grouped_w4a8 import (
+                PpuGroupedW4A8Strategy,
+            )
+
+            self._strategy = PpuGroupedW4A8Strategy(cfg)
+        else:
+            self._strategy = PpuGroupedFP4Strategy(
+                cfg,
+                sglang_moe=True,
+                fused_gather=True,
+                fused_scale_gather=platform_provider._bool(
+                    "DSV4_MOE_SCALE_GATHER_FUSED", True
+                ),
+            )
         self._strategy.setup_weights(layer_weights)
         self.strategy_name = self._strategy.name
         if self._strategy.routed_tp_size != tp_size:
@@ -122,7 +128,9 @@ class PpuTPMoE(nn.Module):
             swiglu_limit=swiglu_limit,
             platform_provider=platform_provider,
         )
-        self._reduce = partial(all_reduce, group=Group.TP, inplace=True) if tp_size > 1 else None
+        self._reduce = (
+            partial(all_reduce, group=Group.TP, inplace=True) if tp_size > 1 else None
+        )
         self._shared_phases = (
             platform_provider._bool("DSV4_PPU_PREFILL_MOE_SHARED_PHASES", True)
             and tp_size == 4

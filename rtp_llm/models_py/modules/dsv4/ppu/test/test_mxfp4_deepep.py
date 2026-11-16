@@ -4,15 +4,16 @@ Run with four or eight exclusively leased visible GPUs. Four-rank diagnostics
 do not qualify the eight-rank model or its SGLang throughput target.
 """
 
+import math
 import os
 import tempfile
 import unittest
 from datetime import timedelta
 
 import torch
-from rtp_llm.device.device_type import is_ppu
 import torch.distributed as dist
 import torch.multiprocessing as mp
+from rtp_llm.device.device_type import is_ppu
 
 
 @torch.inference_mode()
@@ -21,8 +22,12 @@ def run_rank(rank, world, rendezvous):
         DeepEPWrapper,
         DeepepWrapperConfig,
     )
-    from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_moe_config import PpuMoeConfig as MoeCfg
-    from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_deepep_fp4 import PpuDeepEPFP4Strategy
+    from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_deepep_fp4 import (
+        PpuDeepEPFP4Strategy,
+    )
+    from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_moe_config import (
+        PpuMoeConfig as MoeCfg,
+    )
     from rtp_llm.utils.model_weight import W
 
     torch.set_num_threads(1)
@@ -53,7 +58,18 @@ def run_rank(rank, world, rendezvous):
         ll_num_max_token_per_rank=capacity,
     )
     DeepEPWrapper.create(config, group=dist.group.WORLD)
-    strategy = PpuDeepEPFP4Strategy(
+    activation = os.environ.get("RTP_PPU_MOE_TEST_ACTIVATION", "fp4")
+    strategy_type = PpuDeepEPFP4Strategy
+    if activation == "fp8":
+        from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_deepep_w4a8 import (
+            PpuDeepEPW4A8Strategy,
+        )
+
+        strategy_type = PpuDeepEPW4A8Strategy
+    elif activation != "fp4":
+        raise ValueError("RTP_PPU_MOE_TEST_ACTIVATION must be fp4 or fp8")
+    output_dtype = torch.bfloat16 if activation == "fp8" else torch.float32
+    strategy = strategy_type(
         MoeCfg(
             layer_id=0,
             dim=dim,
@@ -71,11 +87,20 @@ def run_rank(rank, world, rendezvous):
         ),
         expected_m_policy=os.environ.get("RTP_PPU_MOE_TEST_HINT", "capacity"),
         gemm_tile=os.environ.get("RTP_PPU_MOE_TEST_TILE", "auto"),
+        output_dtype=output_dtype,
     )
     # Each nibble denotes exactly 1. W1/W3 use 2**-8; W2 uses an
     # expert-specific power of two, making route/EP-shard mistakes observable.
     w1 = torch.full((local, inter, dim // 2), 0x22, dtype=torch.uint8, device=device)
     s1 = torch.full((local, inter, dim // 32), 119, dtype=torch.uint8, device=device)
+    if activation == "fp8":
+        # Keep the exact same analytic dot product with only 2048 nonzero
+        # terms. Continuous mixed-FP8 MMA accumulation of 4096 positive
+        # maximum-payload terms loses precision on M890P (also in the
+        # reference backend). This test isolates dispatch/combine and Graph
+        # state; long-K arithmetic is checked separately against reference.
+        w1[..., dim // 4 :].zero_()
+        s1.fill_(120)
     w2 = torch.full((local, dim, inter // 2), 0x22, dtype=torch.uint8, device=device)
     s2 = torch.empty((local, dim, inter // 32), dtype=torch.uint8, device=device)
     for expert in range(local):
@@ -123,14 +148,23 @@ def run_rank(rank, world, rendezvous):
         if not masked:
             weights.copy_(route_weights)
         multipliers = (2.0 ** (ids.clamp_min(0) % 4)) * route_weights
-        reference = (1, 12, 24, 256)[case] * multipliers.sum(-1)
+        if activation == "fp8":
+            # Constant rows have exact E4M3 payload 448 and a row scale.
+            # Quantization therefore preserves the SwiGLU result up to FP32
+            # arithmetic, followed by the reference's BF16 W2 boundary.
+            gate = (0.25, 0.75, 1.0, 3.0)[case]
+            down = 32.0 * gate * gate / (1.0 + math.exp(-gate))
+            base = torch.tensor(down, dtype=torch.bfloat16).float().item()
+        else:
+            base = (1, 12, 24, 256)[case]
+        reference = base * multipliers.sum(-1)
         return reference.to(torch.bfloat16).float().to(device)
 
     def check(output, expected):
         assert output.shape == (batch, dim)
-        assert output.dtype == torch.float32
+        assert output.dtype == output_dtype
         torch.testing.assert_close(
-            output, expected[:, None].expand_as(output), rtol=0, atol=0
+            output.float(), expected[:, None].expand_as(output), rtol=0, atol=0
         )
 
     expected = inputs(0, True, batch)
@@ -173,7 +207,14 @@ def run_rank(rank, world, rendezvous):
 
 class Mxfp4DeepEPTest(unittest.TestCase):
     def test_actual_dispatch_mlp_combine_and_graph(self):
-        world = int(os.environ.get("RTP_PPU_EP_TEST_WORLD_SIZE", "4"))
+        activation = os.environ.get("RTP_PPU_MOE_TEST_ACTIVATION", "fp4")
+        world = int(
+            os.environ.get(
+                "RTP_PPU_EP_TEST_WORLD_SIZE", "8" if activation == "fp8" else "4"
+            )
+        )
+        if activation == "fp8" and world != 8:
+            raise ValueError("W4A8 requires the actual EP8 topology")
         if world not in (4, 8):
             raise ValueError("The model-shape diagnostic requires EP4 or EP8")
         if not torch.cuda.is_available() or torch.cuda.device_count() < world:

@@ -3,8 +3,9 @@
 The fused kernel accumulates a token's routes in stable ``(expert_id,
 original_slot)`` order -- the expert-major order used by the eager LocalLoop
 implementation -- reading each ``BF16 down`` row once and forming the
-``down * FP32 route_weight`` product in FP32 registers.  This is the layout
-SGLang reaches with ``_fwd_kernel_ep_gather``.
+``down * FP32 route_weight`` product in FP32 registers. W4A8 explicitly
+selects original top-k slot order to match the reference
+``_fwd_kernel_ep_gather`` instead.
 
 The historical two-kernel path materialized every product into an FP32
 ``[routes, dim]`` workspace before reducing it.  It is retained behind
@@ -130,6 +131,7 @@ def _fused_route_gather_kernel(
     TOPK: tl.constexpr,
     MAX_TOPK: tl.constexpr,
     BLOCK_D: tl.constexpr,
+    ORIGINAL_SLOT_ORDER: tl.constexpr,
 ):
     """Reduce one token's routes without materializing the FP32 products."""
 
@@ -147,9 +149,12 @@ def _fused_route_gather_kernel(
     ).to(tl.int64)
     remaining = slot_mask & (expert_ids >= 0) & (grouped_rows >= 0)
 
-    # Identical key construction and selection order to the two-kernel path;
-    # only the FP32 workspace round trip is removed.
-    stable_keys = expert_ids * (TOPK + 1) + slots.to(tl.int64)
+    # The legacy LocalLoop contract is expert-major. The W4A8 reference
+    # accumulates in original top-k slot order, including FP32 FMA rounding.
+    if ORIGINAL_SLOT_ORDER:
+        stable_keys = slots.to(tl.int64)
+    else:
+        stable_keys = expert_ids * (TOPK + 1) + slots.to(tl.int64)
     sentinel: tl.constexpr = 0x7FFFFFFFFFFFFFFF
     accumulated = tl.zeros([BLOCK_D], dtype=tl.float32)
     for _ in tl.static_range(0, TOPK):
@@ -233,6 +238,7 @@ def gather_local_loop_compatible(
     output: torch.Tensor,
     *,
     fused: bool | None = None,
+    original_slot_order: bool = False,
 ) -> None:
     """Gather grouped BF16 expert rows into a caller-owned FP32 output.
 
@@ -303,6 +309,8 @@ def gather_local_loop_compatible(
     block_d = 256
     gather_grid = (tokens, triton.cdiv(dim, block_d))
     use_fused = _fused_gather_enabled() if fused is None else fused
+    if original_slot_order and not use_fused:
+        raise ValueError("Original slot ordering requires fused gather")
     if use_fused:
         fused_block_d, fused_max_topk = _fused_launch_config(dim, topk)
         _fused_route_gather_kernel[(tokens, triton.cdiv(dim, fused_block_d))](
@@ -316,6 +324,7 @@ def gather_local_loop_compatible(
             dim,
             ROUTE_SCALE=1.0,
             ADD_SHARED=False,
+            ORIGINAL_SLOT_ORDER=original_slot_order,
             TOPK=topk,
             MAX_TOPK=fused_max_topk,
             BLOCK_D=fused_block_d,
@@ -357,6 +366,8 @@ def gather_and_combine_local_loop_compatible(
     shared: torch.Tensor,
     output: torch.Tensor,
     route_scale: float,
+    *,
+    original_slot_order: bool = False,
 ) -> None:
     """Gather routed rows and combine the shared TP partial in one kernel.
 
@@ -389,8 +400,7 @@ def gather_and_combine_local_loop_compatible(
             "output_index must be int32/int64 with the same shape as topk_ids"
         )
     if any(
-        not tensor.is_contiguous()
-        for tensor in (topk_ids, topk_weights, output_index)
+        not tensor.is_contiguous() for tensor in (topk_ids, topk_weights, output_index)
     ):
         raise ValueError("route ids, weights, and output_index must be contiguous")
 
@@ -414,7 +424,9 @@ def gather_and_combine_local_loop_compatible(
     if not down.is_cuda or any(
         tensor.device != down.device for tensor in tensors.values()
     ):
-        raise ValueError("all tensors must be CUDA-compatible PPU tensors on one device")
+        raise ValueError(
+            "all tensors must be CUDA-compatible PPU tensors on one device"
+        )
     output_pointer = output.untyped_storage().data_ptr()
     if any(
         tensor.untyped_storage().data_ptr() == output_pointer
@@ -434,6 +446,7 @@ def gather_and_combine_local_loop_compatible(
         dim,
         ROUTE_SCALE=float(route_scale),
         ADD_SHARED=True,
+        ORIGINAL_SLOT_ORDER=original_slot_order,
         TOPK=topk,
         MAX_TOPK=fused_max_topk,
         BLOCK_D=fused_block_d,

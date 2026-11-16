@@ -12,8 +12,11 @@ from types import MappingProxyType
 from typing import Any, Callable
 
 import torch
-
-from rtp_llm.models_py.modules.dsv4.ppu.attention.attention_contract import scheduler_key, validate_dual_pool, validate_swa_pool
+from rtp_llm.models_py.modules.dsv4.ppu.attention.attention_contract import (
+    scheduler_key,
+    validate_dual_pool,
+    validate_swa_pool,
+)
 
 
 class PpuModuleProvider:
@@ -40,6 +43,11 @@ class PpuModuleProvider:
             dict(os.environ if execution_options is None else execution_options)
         )
         self._hca_split = False
+        self._moe_activation = self.execution_options.get(
+            "DSV4_PPU_MOE_ACTIVATION", "fp4"
+        )
+        if self._moe_activation not in ("fp4", "fp8"):
+            raise ValueError("DSV4_PPU_MOE_ACTIVATION must be fp4 or fp8")
 
     def _bool(self, name, default=False):
         raw = self.execution_options.get(name)
@@ -50,16 +58,18 @@ class PpuModuleProvider:
             return True
         if value in ("0", "false", "off", "no"):
             return False
-        raise ValueError("expected one of ['0', '1', 'false', 'no', 'off', 'on', 'true', 'yes']")
+        raise ValueError(
+            "expected one of ['0', '1', 'false', 'no', 'off', 'on', 'true', 'yes']"
+        )
 
     def build_shared_expert(self, *args, platform_provider=None, **kwargs):
-        from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_shared_expert import PpuSharedExpert
+        from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_shared_expert import (
+            PpuSharedExpert,
+        )
 
         if platform_provider is not None and platform_provider is not self:
             raise ValueError("Shared expert received a different model adapter")
-        sglang_moe = kwargs.pop(
-            "sglang_moe", self._bool("DSV4_PPU_SGLANG_MOE", False)
-        )
+        sglang_moe = kwargs.pop("sglang_moe", self._bool("DSV4_PPU_SGLANG_MOE", False))
         return PpuSharedExpert(
             *args,
             platform_provider=self,
@@ -68,12 +78,16 @@ class PpuModuleProvider:
         )
 
     def build_shared_expert_executor(self, **kwargs):
-        from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_shared_expert import PpuSharedExpertExecutor
+        from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_shared_expert import (
+            PpuSharedExpertExecutor,
+        )
 
         return PpuSharedExpertExecutor()
 
     def run_hc_prenorm(self, *args: Any, **kwargs: Any) -> Any:
-        from rtp_llm.models_py.modules.dsv4.ppu.hc.ppu_hc_prenorm import tf32_hc_prenorm_gemm
+        from rtp_llm.models_py.modules.dsv4.ppu.hc.ppu_hc_prenorm import (
+            tf32_hc_prenorm_gemm,
+        )
 
         return tf32_hc_prenorm_gemm(*args, **kwargs)
 
@@ -94,7 +108,9 @@ class PpuModuleProvider:
         )
 
     def run_compress_kv_write(self, *args, **kwargs):
-        from rtp_llm.models_py.kernels.ppu.attention.compressor import run_fused_compress_kv_write
+        from rtp_llm.models_py.kernels.ppu.attention.compressor import (
+            run_fused_compress_kv_write,
+        )
 
         kwargs.setdefault("hca_split", self._hca_split)
         return run_fused_compress_kv_write(*args, **kwargs)
@@ -120,7 +136,9 @@ class PpuModuleProvider:
         self, default_factory: Callable[..., Any], *args: Any, **kwargs: Any
     ) -> Any:
         del default_factory
-        from rtp_llm.models_py.modules.factory.linear.ppu_impl.fp8_linear import PpuFp8Linear
+        from rtp_llm.models_py.modules.factory.linear.ppu_impl.fp8_linear import (
+            PpuFp8Linear,
+        )
 
         return PpuFp8Linear(
             *args,
@@ -132,7 +150,9 @@ class PpuModuleProvider:
         self, default_factory: Callable[..., Any], *args: Any, **kwargs: Any
     ) -> Any:
         del default_factory
-        from rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_wo_a import PpuWoAFp8Linear
+        from rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_wo_a import (
+            PpuWoAFp8Linear,
+        )
 
         return PpuWoAFp8Linear(
             *args, sglang_layout=self._bool("DSV4_PPU_SGLANG_WO_A", False), **kwargs
@@ -172,7 +192,6 @@ class PpuModuleProvider:
             q, kv_s, weights, cu_start, cu_end, clean_logits
         )
 
-
     indexer_mode = "FP4"
     owns_runtime_buffers = True
 
@@ -180,7 +199,9 @@ class PpuModuleProvider:
         from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.attention import (
             CommitOnlyAttentionFP8,
         )
-        from rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_fp4_indexer import PpuFP4Attention
+        from rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_fp4_indexer import (
+            PpuFP4Attention,
+        )
 
         # DSpARK prefill keeps only wkv/kv_norm per layer, so the commit-only
         # class must survive: the FP4 indexer variant needs Q/O + indexer weights.
@@ -195,8 +216,12 @@ class PpuModuleProvider:
             from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_tp_moe import PpuTPMoE
 
             return PpuTPMoE(*args, platform_provider=self, **kwargs)
+        if self._moe_activation == "fp8":
+            raise ValueError("Prefill W4A8 requires EP1")
         from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_ep_moe import PpuEPMoE
-        from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_legacy_deepep import PpuLegacyDeepEPStrategy
+        from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_legacy_deepep import (
+            PpuLegacyDeepEPStrategy,
+        )
 
         return PpuEPMoE(
             *args,

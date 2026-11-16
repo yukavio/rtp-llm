@@ -2,7 +2,6 @@ import os
 import unittest
 
 import torch
-
 from rtp_llm.cpp.cuda_graph.tests.libtest_cuda_graph_runner import CudaGraphRunner
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 
@@ -39,6 +38,38 @@ class CompiledWarmupModel:
 
 
 class TestCudaGraphCompiledWarmup(unittest.TestCase):
+    def test_stream_owned_backend_is_warmed_on_capture_stream(self) -> None:
+        class StreamOwnedModel:
+            def __init__(self):
+                self.ready = set()
+                self.captured = set()
+
+            def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
+                return None
+
+            def forward(self, inputs, fmha_impl=None):
+                key = (
+                    tuple(inputs.input_hiddens.shape),
+                    torch.cuda.current_stream().cuda_stream,
+                )
+                if torch.cuda.is_current_stream_capturing():
+                    if key not in self.ready:
+                        raise RuntimeError(
+                            "stream-owned backend was not warmed before capture"
+                        )
+                    self.captured.add(key)
+                else:
+                    self.ready.add(key)
+                return PyModelOutputs(inputs.input_hiddens + 1)
+
+        origin = torch.cuda.current_stream().cuda_stream
+        model = StreamOwnedModel()
+        runner = CudaGraphRunner()
+        runner.init_decode(model, HIDDEN_SIZE, 64, 1, [1, 2])
+        self.assertEqual(len(model.captured), 2)
+        self.assertTrue(model.captured.issubset(model.ready))
+        self.assertEqual(torch.cuda.current_stream().cuda_stream, origin)
+
     def test_compiled_backend_is_warmed_before_capture(self) -> None:
         os.environ.pop(WARMUP_ENV, None)
         torch._dynamo.reset()

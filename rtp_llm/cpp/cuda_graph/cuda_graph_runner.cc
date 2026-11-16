@@ -2038,6 +2038,12 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
 
     size_t pre_capture_reserved = cuda_graph::graphReservedBytes();
 
+    // Inputs may have been prepared on the caller's stream. Warm up on the
+    // capture stream itself: native backends can own stream-specific launch
+    // plans/workspaces that cannot be initialized after capture begins.
+    cuda_graph::graphDeviceSynchronize();
+    CudaGraphStreamLife stream_life(capture_stream_);
+
     // WarmUp twice (params already prepared in attn impl __init__/create_params when instance was created)
     RTP_LLM_LOG_INFO("WarmUp for %s %d start.", key_type, key);
     auto attn_pyobj = graph_instances_[key].mem_hold_.attn_pyobj_;
@@ -2064,7 +2070,6 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         // sync before capture
         cuda_graph::graphDeviceSynchronize();
 
-        CudaGraphStreamLife stream_life(capture_stream_);
         auto&               graph               = graph_instances_[key].graph_;
         std::string         output_dot_filename = "";
         if (enable_cuda_graph_debug_mode_) {
