@@ -131,7 +131,23 @@ class PpuDecodeProvider(PpuModuleProvider):
     def build_shared_expert(self, *args, **kwargs):
         shared = super().build_shared_expert(*args, **kwargs)
         shared.fuse_activation_quant = self._decode_fusions
+        self._configure_decode_gemm(shared.w13)
+        self._configure_decode_gemm(shared.w2)
         return shared
+
+    def _configure_decode_gemm(self, linear):
+        from rtp_llm.models_py.modules.factory.linear.ppu_impl.fp8_linear import (
+            PpuFp8Linear,
+        )
+        from rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_wo_a import (
+            PpuWoAFp8Linear,
+        )
+
+        if type(linear) in (PpuFp8Linear, PpuWoAFp8Linear):
+            linear._decode_attention_gemm = self._decode_fusions
+            linear._attn_gemm_ep_size = self._ep_size
+            linear._attn_gemm_tp_size = self._tp_size
+            linear._attn_gemm_profile = self._attn_profile
 
     def build_attention(self, default_factory, *args, **kwargs):
         attention = super().build_attention(
@@ -146,16 +162,15 @@ class PpuDecodeProvider(PpuModuleProvider):
         )
         attention._fuse_qkv_quant = self._decode_fusions
         self._decode_attention_refs.append(weakref.ref(attention))
-        from rtp_llm.models_py.modules.factory.linear.ppu_impl.fp8_linear import PpuFp8Linear
-        from rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_wo_a import PpuWoAFp8Linear
-
-        for linear in (attention.wq_b, attention.wo_a, attention.wo_b):
-            if type(linear) in (PpuFp8Linear, PpuWoAFp8Linear):
-                linear._decode_attention_gemm = self._decode_fusions
-                linear._attn_gemm_ep_size = self._ep_size
-                linear._attn_gemm_tp_size = self._tp_size
-                linear._attn_gemm_profile = self._attn_profile
+        for linear in (
+            attention.wq_b,
+            attention.wo_a,
+            attention.wo_b,
+            getattr(attention, "_decode_qkv_projection", None),
+        ):
+            self._configure_decode_gemm(linear)
         if attention.indexer is not None:
+            self._configure_decode_gemm(getattr(attention.indexer, "wq_b", None))
             attention.indexer.compressor._fuse_decode_queries = self._decode_fusions
             attention.indexer._fuse_query_slices = self._decode_fusions
             attention.indexer._fuse_topk_order = self._decode_fusions
@@ -163,7 +178,9 @@ class PpuDecodeProvider(PpuModuleProvider):
         return attention
 
     def build_shared_expert_executor(self, **kwargs):
-        from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_shared_expert import PpuSharedExpertExecutor
+        from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_shared_expert import (
+            PpuSharedExpertExecutor,
+        )
 
         return PpuSharedExpertExecutor(
             stream_pool=self.stream_pool, start_before_routing=True,
@@ -194,14 +211,12 @@ class PpuDecodeProvider(PpuModuleProvider):
         head.tp_size, head.tp_rank = tp_size, tp_rank
         return head
 
-
     def build_mtp_input_fusion(self, enorm, hnorm, e_proj, h_proj):
         if not self._decode_fusions:
             return None
         from rtp_llm.models_py.modules.dsv4.ppu.mtp.ppu_mtp_input import PpuMtpInputFusion
 
         return PpuMtpInputFusion(enorm, hnorm, e_proj, h_proj)
-
 
     def build_decode_metadata(self, default_factory, *args, **kwargs):
         from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_fmha_impl import (

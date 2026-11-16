@@ -3,6 +3,7 @@
 import math
 import os
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import torch
@@ -14,6 +15,48 @@ from rtp_llm.models_py.modules.factory.linear.ppu_impl import fp8_linear as fp8
 
 
 class DecodeFp8PolicyTest(unittest.TestCase):
+    def test_decode_tiles_reach_merged_indexer_and_shared_projections(self):
+        class Attention(SimpleNamespace):
+            pass
+
+        def linear():
+            result = object.__new__(fp8.PpuFp8Linear)
+            torch.nn.Module.__init__(result)
+            return result
+
+        base = (
+            "rtp_llm.models_py.modules.dsv4.ppu.ppu_module_provider.PpuModuleProvider"
+        )
+        for enabled in (False, True):
+            provider = PpuDecodeProvider(
+                {
+                    **DECODE_EXECUTION_OPTIONS,
+                    "DSV4_PPU_DECODE_FUSIONS": str(int(enabled)),
+                },
+                ep_size=8,
+                tp_size=1,
+            )
+            projections = [linear() for _ in range(7)]
+            attention = Attention(
+                wq_b=projections[0],
+                wo_a=projections[1],
+                wo_b=projections[2],
+                _decode_qkv_projection=projections[3],
+                indexer=SimpleNamespace(
+                    wq_b=projections[4], compressor=SimpleNamespace()
+                ),
+            )
+            shared = SimpleNamespace(w13=projections[5], w2=projections[6])
+            with patch(base + ".build_attention", return_value=attention), patch(
+                base + ".build_shared_expert", return_value=shared
+            ):
+                self.assertIs(provider.build_attention(None), attention)
+                self.assertIs(provider.build_shared_expert(), shared)
+            for projection in projections:
+                self.assertEqual(projection._decode_attention_gemm, enabled)
+                self.assertEqual(projection._attn_gemm_ep_size, 8)
+                self.assertEqual(projection._attn_gemm_tp_size, 1)
+
     def test_provider_freezes_dense_and_grouped_quantization(self):
         with patch.dict(os.environ, {"DSV4_PPU_DECODE_FP8_QUANT": "auto"}):
             provider = PpuDecodeProvider(DECODE_EXECUTION_OPTIONS)

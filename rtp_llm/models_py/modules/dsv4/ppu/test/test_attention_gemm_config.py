@@ -65,6 +65,22 @@ class AttentionGemmConfigTest(unittest.TestCase):
                 )
 
     @patch("deep_gemm.jit_kernels.utils.get_num_sms", return_value=39)
+    def test_other_decode_projections_use_only_measured_ep8_shapes(self, _):
+        for n, k in ((1536, 4096), (8192, 1024), (4096, 4096), (4096, 2048)):
+            for m in (5, 6, 12, 20, 30):
+                self.assertIsNotNone(
+                    decode_attention_gemm_config(m, n, k, ep_size=8, tp_size=1)
+                )
+                for ep, tp in ((1, 1), (8, 2), (16, 1), (32, 1)):
+                    self.assertIsNone(
+                        decode_attention_gemm_config(m, n, k, ep_size=ep, tp_size=tp)
+                    )
+            for m in (1, 8, 10, 16, 18, 24, 32, 40, 48):
+                self.assertIsNone(
+                    decode_attention_gemm_config(m, n, k, ep_size=8, tp_size=1)
+                )
+
+    @patch("deep_gemm.jit_kernels.utils.get_num_sms", return_value=39)
     def test_large_ep_tiles_need_no_opt_in(self, _):
         for ep in (16, 32):
             for m in (2, 4, 6, 12):

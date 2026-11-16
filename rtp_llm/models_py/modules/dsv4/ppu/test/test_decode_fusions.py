@@ -261,7 +261,15 @@ class DecodeFusionsTest(unittest.TestCase):
             PpuFp8Linear,
         )
 
-        for n, k, groups in ((32768, 1024, 1), (4096, 8192, 1), (8192, 4096, 8)):
+        for n, k, groups in (
+            (32768, 1024, 1),
+            (4096, 8192, 1),
+            (8192, 4096, 8),
+            (1536, 4096, 1),
+            (8192, 1024, 1),
+            (4096, 4096, 1),
+            (4096, 2048, 1),
+        ):
             weight = torch.randn((n, k), device="cuda", dtype=torch.bfloat16).to(
                 torch.float8_e4m3fn
             )
