@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import unittest
 import weakref
+from unittest.mock import patch
 
 import torch
 
@@ -94,7 +95,7 @@ class PrefillWarmupTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "whole requests"):
             self.groups()
 
-    def test_workspace_reuse_aux_offsets_and_release_including_failure(self):
+    def test_workspace_reuse_aux_offsets_and_release(self):
         fixed, last = self.v4._mtp_hidden_buffer, self.v4._mtp_last_hidden_buffer
         refs, pointers, calls = [], [], []
 
@@ -138,6 +139,65 @@ class PrefillWarmupTest(unittest.TestCase):
         self.assertEqual(self.v4._mtp_last_hidden_valid_tokens, 2)
         gc.collect()
         self.assertTrue(all(r() is None for r in refs))
+
+    def test_second_group_failure_restores_buffers_and_releases_scratch(self):
+        fixed = torch.full((2, 4), -1.)
+        self.v4._mtp_hidden_buffer = fixed
+        last = self.v4._mtp_last_hidden_buffer
+        refs, calls = [], []
+
+        class Workspace:
+            def __init__(owner, device, **kwargs):
+                owner.buffer = torch.empty(5, 2)
+                refs.extend((weakref.ref(owner), weakref.ref(owner.buffer)))
+
+        def forward(v4, kv, ids, positions, cu, blocks, **kwargs):
+            calls.append(ids.tolist())
+            refs.append(weakref.ref(v4._mtp_hidden_buffer))
+            v4._mtp_hidden_valid_tokens = len(ids)
+            v4._mtp_last_hidden_valid_tokens = 0
+            if len(calls) == 2:
+                raise RuntimeError("second warmup group failed")
+            return ids[:, None].expand(-1, 2).float()
+
+        tables = {tag: a.kv_cache_kernel_block_id for tag, a in self.attn.items()}
+        with patch.dict(scope, PrefillWorkspace=Workspace):
+            with self.assertRaisesRegex(RuntimeError, "second warmup group"):
+                scope["forward_warmup_groups"](
+                    self.v4, None, torch.arange(10), self.positions, self.cu,
+                    tables, self.attn, self.groups(), forward)
+        self.assertEqual(len(calls), 2)
+        self.assertIs(self.v4._mtp_hidden_buffer, fixed)
+        self.assertIs(self.v4._mtp_last_hidden_buffer, last)
+        self.assertEqual(self.v4._mtp_hidden_valid_tokens, 1)
+        self.assertEqual(self.v4._mtp_last_hidden_valid_tokens, 2)
+        gc.collect()
+        self.assertTrue(all(ref() is None for ref in refs))
+
+    def test_slice_real_pybind_attention_inputs(self):
+        from rtp_llm.ops.compute_ops import PyAttentionInputs, get_typemeta
+
+        parent = PyAttentionInputs()
+        for name, value in vars(self.attn["swa_kv"]).items():
+            if name not in ("cache_store_inputs", "cache_store_writer", "dtype"):
+                setattr(parent, name, value)
+        parent.dtype = get_typemeta(torch.empty(0, dtype=torch.bfloat16))
+        parent.is_s_padded = True
+        parent.padding_offset = torch.zeros(10, dtype=torch.int32)
+        with patch.dict(scope, PyAttentionInputs=PyAttentionInputs):
+            result = scope["slice_warmup_attention"](
+                parent, 2, 4, 5, 10, self.cu, self.positions)
+        self.assertIsInstance(result, PyAttentionInputs)
+        self.assertEqual(result.input_lengths.tolist(), [4, 1])
+        self.assertEqual(result.prefix_lengths.tolist(), [16, 32])
+        self.assertEqual(result.cu_seqlens.tolist(), [0, 4, 5])
+        self.assertEqual(result.cu_kv_seqlens_device.tolist(), [0, 20, 53])
+        self.assertEqual(result.kv_cache_kernel_block_id.shape[0], 2)
+        self.assertEqual(result.combo_position_ids.tolist(), list(range(5, 10)))
+        self.assertEqual(result.context_total_kv_length, 53)
+        self.assertEqual(result.total_tokens, 5)
+        self.assertTrue(result.is_s_padded)
+        self.assertEqual(parent.input_lengths.tolist(), [3, 2, 4, 1])
 
     def test_oversized_mtp_buffer_uses_one_reused_group_scratch(self):
         fixed = torch.full((2, 4), -1.)

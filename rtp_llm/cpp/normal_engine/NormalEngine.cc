@@ -42,6 +42,7 @@
 
 #if USING_CUDA
 #include "c10/cuda/CUDACachingAllocator.h"
+#include "c10/cuda/CUDAException.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 
 #include "c10/cuda/CUDAGuard.h"
@@ -686,10 +687,8 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
     }
 
     size_t max_consumed = 0;
-    // Warmup is a performance reservation, not a correctness gate. A shape that
-    // does not fit leaves the process unusable if it is allowed to escape, so a
-    // failed warmup is logged and skipped instead of aborting the engine.
-    try {
+    // Every shape must succeed before its peak can safely size the production KV cache.
+    // In particular, an OOM must not turn an incomplete activation measurement into zero.
     {
         auto            warmup_cache_manager    = createWarmupCacheManager();
         ResourceContext warmup_resource_context = resource_context_;
@@ -738,25 +737,10 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
         }
         (void)executor_.reset(nullptr);
     }
-    cudaDeviceSynchronize();
+    C10_CUDA_CHECK(cudaDeviceSynchronize());
     c10::cuda::CUDACachingAllocator::emptyCache();
     return WarmUpResult({getGpuExecStatus().device_memory_status.available_bytes, max_consumed});
-    } catch (const std::exception& e) {
-        RTP_LLM_LOG_WARNING("prefill warmup failed and is skipped: %s", e.what());
-        (void)executor_.reset(nullptr);
-        if (!params.py_model.is_none()) {
-            try {
-                // Drop the temporary warmup KV tensors the Python model still references.
-                pybind11::gil_scoped_acquire gil;
-                params.py_model.attr("initialize")(torch_ext::PyModelInitResources{});
-            } catch (const std::exception& reset_error) {
-                RTP_LLM_LOG_WARNING("prefill warmup py model reset failed: %s", reset_error.what());
-            }
-        }
-        cudaDeviceSynchronize();
-        c10::cuda::CUDACachingAllocator::emptyCache();
-        return WarmUpResult({getGpuExecStatus().device_memory_status.available_bytes, 0});
-    }
+
 #endif
 }
 

@@ -1354,6 +1354,41 @@ TEST_F(NormalEngineTest, testChunkedPrefillWarmupStartup) {
     ASSERT_EQ(cache_config.groups().front().block_num, 100u);
 }
 
+TEST_F(NormalEngineTest, testChunkedPrefillWarmupFailureAbortsStartup) {
+    // A successful token-heavy shape is not a safe activation bound when the
+    // later row-heavy shape fails. Neither OOM nor a model bug may publish a
+    // zero/partial reservation and proceed to production KV allocation.
+    for (const bool fail_first_shape : {false, true}) {
+        for (const std::string error : {"CUDA out of memory (injected)", "invalid warmup state (injected)"}) {
+            SCOPED_TRACE(error + (fail_first_shape ? " first shape" : " row-heavy shape"));
+            CustomConfig config;
+            config.warm_up            = true;
+            config.prefill_chunk_size = 4;
+            ModelConfig   model_config;
+            RuntimeConfig runtime_config;
+            KVCacheConfig kv_cache_config;
+            auto params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+            int successful_forwards = 0;
+            bool injected = false;
+            NormalExecutor::test_model_factory = [&](const GptModelInitParams&) {
+                return std::make_unique<MockModel>(model_config.vocab_size, [&](const GptModelInputs& inputs) {
+                    if (fail_first_shape || inputs.input_lengths.numel() > 1) {
+                        injected = true;
+                        throw std::runtime_error(error);
+                    }
+                    ++successful_forwards;
+                });
+            };
+            struct FactoryResetGuard {
+                ~FactoryResetGuard() { NormalExecutor::test_model_factory = nullptr; }
+            } factory_reset_guard;
+            EXPECT_ANY_THROW((void)std::make_shared<NormalEngine>(params, nullptr));
+            EXPECT_TRUE(injected);
+            EXPECT_EQ(successful_forwards, fail_first_shape ? 0 : 5);
+        }
+    }
+}
+
 TEST_F(NormalEngineTest, testChunkedPrefillWarmupCapsIntMaxBudgetByContextBatchSize) {
     CustomConfig config;
     config.warm_up                = true;
