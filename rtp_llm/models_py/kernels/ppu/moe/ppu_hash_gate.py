@@ -10,7 +10,6 @@ from rtp_llm.models_py.kernels.ppu.moe.ppu_gate_padding import supports_active_m
 
 @triton.jit
 def _hash_routes(
-    RAW,
     ACTIVE,
     IDS,
     TABLE,
@@ -28,16 +27,13 @@ def _hash_routes(
 ):
     row = tl.program_id(0).to(tl.int64)
     experts = tl.arange(0, BLOCK_E)
-    raw = tl.load(RAW + row * E + experts, experts < E, 0)
     active = tl.load(ACTIVE + row * E + experts, experts < E, 0)
     finite = (
         tl.sum(
             (
                 (experts < E)
                 & (
-                    (tl.abs(raw) >= float("inf"))
-                    | (raw != raw)
-                    | (tl.abs(active) >= float("inf"))
+                    (tl.abs(active) >= float("inf"))
                     | (active != active)
                 )
             ).to(tl.int32),
@@ -50,9 +46,8 @@ def _hash_routes(
     token_ok = (token >= -VOCAB) & (token < VOCAB)
     token = tl.where(token < 0, token + VOCAB, token)
     indices = tl.load(TABLE + token * K + slots, token_ok & (slots < K), 0).to(tl.int64)
-    # Non-finite rows fall back to the slot identity routing, as the baseline
-    # hash gate does, instead of trusting a table row for a broken activation.
-    indices = tl.where(finite, indices, slots.to(tl.int64))
+    # Hash routes are deterministic even for non-finite activated scores.
+    # Match the unfused gate: retain table IDs and replace only the weights.
     index_ok = (indices >= 0) & (indices < E)
     selected = tl.load(ACTIVE + row * E + indices, (slots < K) & index_ok, 0)
     denom = tl.sum(selected, 0) + 1.0e-12
@@ -107,7 +102,6 @@ def hash_gate_with_padding(
         active = F.softplus(scores).sqrt()
         valid = torch.empty((m,), device=scores.device, dtype=torch.bool)
         _hash_routes[(m,)](
-            scores,
             active,
             input_ids,
             table,
@@ -125,6 +119,6 @@ def hash_gate_with_padding(
             num_warps=4,
             enable_fp_fusion=False,
         )
-        # Keep the baseline's asynchronous bounds check for finite hash rows.
+        # Keep the baseline's asynchronous bounds check for hash rows.
         torch._assert_async(valid.all(), "hash token/expert index out of bounds")
     return weights, indices

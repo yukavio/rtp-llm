@@ -13,7 +13,7 @@ from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_deepep_fp4 import pad_topk
     "requires a PPU",
 )
 class TopkPaddingTest(unittest.TestCase):
-    def test_hash_nonfinite_rows_fall_back_to_slot_routes(self):
+    def test_hash_nonfinite_rows_match_unfused_gate(self):
         from rtp_llm.models_py.kernels.ppu.moe.ppu_hash_gate import hash_gate_with_padding
 
         scores = torch.tensor(
@@ -24,19 +24,17 @@ class TopkPaddingTest(unittest.TestCase):
         ids = torch.zeros(4, dtype=torch.int64, device="cuda")
         scale, topk = 2.5, 2
         active = torch.nn.functional.softplus(scores).sqrt()
-        # PR1434 semantics: a row with any non-finite router logit or activated
-        # score is replaced wholesale by slot experts 0..topk-1 with uniform
-        # weights, so a broken row never trusts the hash table.
-        finite = torch.isfinite(scores).all(dim=-1) & torch.isfinite(active).all(dim=-1)
-        slots = torch.arange(topk, device="cuda").expand(4, topk)
-        routed = torch.where(finite.unsqueeze(-1), table[ids], slots)
-        selected = active.gather(1, routed)
-        expected_w = selected / (selected.sum(dim=-1, keepdim=True) + 1e-12) * scale
-        expected_w = torch.where(
-            finite.unsqueeze(-1),
-            expected_w,
-            torch.full_like(expected_w, scale / topk),
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.gate import (
+            _select_routes_with_nonfinite_fallback,
         )
+
+        expected_w, routed = _select_routes_with_nonfinite_fallback(
+            active, active, topk, scale, True, table[ids]
+        )
+        # -Inf maps to finite zero through softplus and must retain its actual
+        # normalized weights. NaN/+Inf replace weights but keep hash expert IDs.
+        self.assertTrue(torch.equal(routed, table[ids]))
+        self.assertEqual(expected_w[0, 1].item(), 0.0)
         for mask in (torch.ones(4, dtype=torch.bool, device="cuda"),
                      torch.tensor([True, False, True, False], device="cuda")):
             keep = mask.unsqueeze(-1)
