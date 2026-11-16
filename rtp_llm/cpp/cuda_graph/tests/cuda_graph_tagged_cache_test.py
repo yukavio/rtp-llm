@@ -1881,6 +1881,69 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         )
         self.assertFalse(runner.canRun(non_prefill))
 
+    def test_device_metadata_opt_in_updates_tagged_replay_without_host_copies(self):
+        class DeviceMetadataModel(TaggedSequenceLengthModel):
+            def __init__(self, enabled):
+                self.enabled = enabled
+
+            def supports_device_attention_metadata(self):
+                return self.enabled
+
+            def forward(self, inputs, fmha_impl=None):
+                output = super().forward(inputs, fmha_impl).hidden_states
+                groups = inputs.attention_inputs
+                table_signature = (
+                    groups["full"].kv_cache_kernel_block_id_device[0, 0]
+                    + 16 * groups["aux"].kv_cache_kernel_block_id_device[0, 0]
+                )
+                return PyModelOutputs(output + table_signature.to(output.dtype))
+
+        for enabled in (False, True):
+            model = DeviceMetadataModel(enabled)
+            runner = CudaGraphRunner()
+            runner.init_decode(
+                model,
+                HIDDEN_SIZE,
+                64,
+                KERNEL_BLOCK_TABLE_WIDTH,
+                [4],
+                GROUP_TAGS,
+                True,
+                6,
+            )
+            for batch, prefix in ((4, 11), (1, 23), (3, 7), (2, 19)):
+                with self.subTest(enabled=enabled, batch=batch, prefix=prefix):
+                    inputs = _build_target_verify_inputs(
+                        GROUP_TAGS,
+                        {"full": batch, "aux": prefix % 3 + 1},
+                        batch_size=batch,
+                        query_len=6,
+                        prefix_len=prefix,
+                    )
+                    for attn in inputs.attention_inputs.values():
+                        attn.input_lengths = attn.input_lengths.cuda()
+                        attn.prefix_lengths = attn.prefix_lengths.cuda()
+                        attn.kv_cache_kernel_block_id = (
+                            attn.kv_cache_kernel_block_id_device
+                        )
+                    with torch.profiler.profile(
+                        activities=[torch.profiler.ProfilerActivity.CPU]
+                    ) as prof:
+                        self.assertTrue(runner.prepare(inputs))
+                    scopes = {event.key for event in prof.key_averages()}
+                    self.assertEqual(
+                        "cuda_graph.prepareAttentionInputs(host_mirror_copy)" in scopes,
+                        not enabled,
+                    )
+                    output = runner.forward(inputs).hidden_states.clone()
+                    expected = torch.tensor(
+                        [24, batch * prefix + 24, 24, prefix + 1 if batch == 4 else 6],
+                        dtype=output.dtype,
+                        device=output.device,
+                    )
+                    expected += batch + 16 * (prefix % 3 + 1)
+                    torch.testing.assert_close(output, expected.expand_as(output))
+
     def test_target_verify_uses_reserved_block_dummy_rows(self) -> None:
         scenarios = (
             (4, 5, 11, (4, 3, 2, 1, 4)),

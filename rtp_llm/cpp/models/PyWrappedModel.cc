@@ -408,13 +408,16 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         // prefix_lengths): the CUDA graph padding fill copies this scalar into
         // the cu_kv_seqlens tail, and a prefix-less value makes the array
         // non-monotonic whenever prefix reuse / target verify is active.
-        // prefix_lengths here is a source tensor (never a deferred H2D copy),
-        // so summing it is safe; item() adds one stream sync on this path.
-        int64_t prefix_sum = 0;
-        if (py_attn_inputs.prefix_lengths.defined() && py_attn_inputs.prefix_lengths.numel() > 0) {
-            prefix_sum = py_attn_inputs.prefix_lengths.sum().item<int64_t>();
+        // Device-only backends retain the metadata kernel's live tail below.
+        // Other backends preserve the eager host scalar contract.
+        const bool defer_kv_total = device_attention_metadata_ && py_attn_inputs.prefix_lengths.is_cuda();
+        if (!defer_kv_total) {
+            int64_t prefix_sum = 0;
+            if (py_attn_inputs.prefix_lengths.defined() && py_attn_inputs.prefix_lengths.numel() > 0) {
+                prefix_sum = py_attn_inputs.prefix_lengths.sum().item<int64_t>();
+            }
+            py_attn_inputs.setContextTotalKvLength(py_attn_inputs.total_tokens + static_cast<int>(prefix_sum));
         }
-        py_attn_inputs.context_total_kv_length = py_attn_inputs.total_tokens + static_cast<int>(prefix_sum);
         py_attn_inputs.cu_seqlens              = torch::empty({0}, host_i32);
         py_attn_inputs.cu_seqlens_device       = torch::empty({batch_size + 1}, cuda_i32);
         py_attn_inputs.cu_kv_seqlens_device    = torch::empty({batch_size + 1}, cuda_i32);
@@ -433,6 +436,11 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
                                           py_attn_inputs.cu_kv_seqlens_device,
                                           py_attn_inputs.padding_offset,
                                           c10::cuda::getCurrentCUDAStream().stream());
+        if (defer_kv_total) {
+            // The metadata kernel already computes this sum. Retain the live
+            // request tail, excluding any later graph padding rows.
+            py_attn_inputs.context_total_kv_length_device = py_attn_inputs.cu_kv_seqlens_device.select(0, batch_size);
+        }
 #else
         RTP_LLM_FAIL("device attention input metadata requires CUDA");
 #endif

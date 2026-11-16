@@ -1110,6 +1110,49 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                 )
                 self.assertEqual(result["records"], [])
 
+    @unittest.skipIf(
+        os.environ.get("TEST_USING_DEVICE") == "ROCM", "CUDA metadata kernel"
+    )
+    def test_device_metadata_total_is_live_and_explicit_setter_clears_it(self):
+        class DeviceMetadataModel(CacheStoreForwardModel):
+            def __init__(self, enabled):
+                super().__init__()
+                self.enabled = enabled
+                self.totals = []
+
+            def supports_device_attention_metadata(self):
+                return self.enabled
+
+            def _forward_one(self, inputs):
+                groups = inputs.attention_inputs
+                attn = (
+                    next(iter(groups.values())) if isinstance(groups, dict) else groups
+                )
+                self.totals.append(attn.context_total_kv_length)
+                # Copy retains the lazy total, but explicitly assigning a scalar
+                # must invalidate its old device producer.
+                import copy
+
+                copied = copy.copy(attn)
+                assert copied.context_total_kv_length == self.totals[-1]
+                copied.context_total_kv_length = 37
+                assert copied.context_total_kv_length == 37
+                return super()._forward_one(inputs)
+
+        for enabled in (False, True):
+            for custom_stream in (False, True):
+                with self.subTest(enabled=enabled, custom_stream=custom_stream):
+                    stream = (
+                        torch.cuda.Stream()
+                        if custom_stream
+                        else torch.cuda.default_stream()
+                    )
+                    model = DeviceMetadataModel(enabled)
+                    with torch.cuda.stream(stream):
+                        run_scenario(model, "cuda_lengths_host_prefix_device")
+                    stream.synchronize()
+                    self.assertEqual(model.totals, [904, 776, 8])
+
     def test_successful_generation_prefill_capture_does_not_reserve_request_blocks(
         self,
     ) -> None:

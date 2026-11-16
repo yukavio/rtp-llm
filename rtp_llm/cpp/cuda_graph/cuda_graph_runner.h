@@ -101,6 +101,9 @@ public:
                                       || role_ == CudaGraphRole::MTP_DRAFT_PREFILL
                                       || role_ == CudaGraphRole::GENERATION_PREFILL;
         is_target_verify_ = role_ == CudaGraphRole::TARGET_VERIFY;
+        device_attention_metadata_ = !isEmbeddingStylePrefillCudaGraph() && !isGenerationPrefillCudaGraph()
+                                     && py::hasattr(py_instance_, "supports_device_attention_metadata")
+                                     && py_instance_.attr("supports_device_attention_metadata")().cast<bool>();
         draft_prefill_uses_request_lanes_ =
             isMtpDraftPrefillCudaGraph() && py::hasattr(py_instance_, "cuda_graph_draft_prefill_uses_request_lanes")
             && py_instance_.attr("cuda_graph_draft_prefill_uses_request_lanes")().cast<bool>();
@@ -257,6 +260,7 @@ private:
     bool                    enable_cuda_graph_{false};
     bool                    is_prefill_cuda_graph_mode_{false};
     bool                    is_target_verify_{false};
+    bool                    device_attention_metadata_{false};
     bool                    draft_prefill_uses_request_lanes_{false};
     CudaGraphRole           role_{CudaGraphRole::AUTO};
     cuda_graph::GraphStream capture_stream_;

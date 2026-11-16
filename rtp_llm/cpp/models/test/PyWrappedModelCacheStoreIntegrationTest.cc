@@ -653,7 +653,7 @@ Scenario makeScenario(const std::string& name) {
             {2, 2, 8});
         return {std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
     }
-    if (name == "cuda_lengths_host_prefix") {
+    if (name.find("cuda_lengths_host_prefix") == 0) {
         auto config           = makeCacheConfig({{"full", 128, 256}});
         auto layout           = makeLayout(config);
         auto inputs           = makeInputs({1, 3, 4},
@@ -667,6 +667,9 @@ Scenario makeScenario(const std::string& name) {
                                            256);
         inputs.input_lengths  = inputs.input_lengths.cuda();
         inputs.prefix_lengths = pinnedTensor({128, 256, 512}, {3});
+        if (name == "cuda_lengths_host_prefix_device") {
+            inputs.prefix_lengths = inputs.prefix_lengths.cuda();
+        }
         inputs.pd_separation  = false;
         Scenario scenario{
             std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
@@ -1152,8 +1155,14 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object         py_model,
         }
         if (scenario_name.find("cuda_lengths_host_prefix") == 0) {
             scenario.inputs.prefix_lengths = pinnedTensor({256, 128, 384}, {3});
+            if (scenario_name == "cuda_lengths_host_prefix_device") {
+                scenario.inputs.prefix_lengths = scenario.inputs.prefix_lengths.cuda();
+            }
             (void)model.forward(scenario.inputs);
             scenario.inputs.prefix_lengths = pinnedTensor({0, 0, 0}, {3});
+            if (scenario_name == "cuda_lengths_host_prefix_device") {
+                scenario.inputs.prefix_lengths = scenario.inputs.prefix_lengths.cuda();
+            }
             (void)model.forward(scenario.inputs);
         }
         capture_stats = model.hiddenStateCaptureStats();

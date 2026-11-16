@@ -20,6 +20,21 @@ def tp_local_prefill_q_dim(n_heads: int, head_dim: int, tp_size: int) -> int:
 
 
 class PpuDeepSeekV4Model(DeepSeekV4Model):
+
+    def supports_device_attention_metadata(self) -> bool:
+        """The opted-in Decode graph path reads lengths and page tables on device.
+
+        Host mirrors may retain capture-time values. The metadata Graph and
+        DSpARK's no-op prepare hook must not inspect their contents on replay.
+        """
+        return (
+            self._is_decode_role
+            and self._platform_provider.execution_options.get(
+                "DSV4_PPU_MTP_METADATA_GRAPH", "0"
+            )
+            == "1"
+        )
+
     def __init__(self, model_config, parallelism_config, weights, moe_config, max_generate_batch_size, **kwargs):
         provider = kwargs.pop("platform_provider", None)
         if provider is None:

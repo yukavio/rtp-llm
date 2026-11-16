@@ -297,6 +297,17 @@ struct PyAttentionInputs {
     torch::Tensor cu_kv_seqlens_device;  // device only (no host mirror needed)
     torch::Tensor decode_cu_seqlens;
     int           context_total_kv_length = 0;
+    // Optional live scalar for device-only metadata producers. Python reads
+    // retain the scalar contract, synchronizing only when actually requested.
+    torch::Tensor context_total_kv_length_device;
+    int getContextTotalKvLength() const {
+        return context_total_kv_length_device.defined() ? context_total_kv_length_device.item<int>() :
+                                                        context_total_kv_length;
+    }
+    void setContextTotalKvLength(int value) {
+        context_total_kv_length = value;
+        context_total_kv_length_device = torch::Tensor();
+    }
     int           total_tokens            = 0;
     torch::Tensor padding_offset;
     torch::Tensor combo_position_ids;

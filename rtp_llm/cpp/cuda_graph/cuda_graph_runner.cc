@@ -495,10 +495,13 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     // graph rows are an implementation detail and must not contribute to the
     // request-level totals.
     py_model_inputs_.attention_inputs.context_total_kv_length = inputs.attention_inputs.context_total_kv_length;
+    py_model_inputs_.attention_inputs.context_total_kv_length_device =
+        inputs.attention_inputs.context_total_kv_length_device;
     py_model_inputs_.attention_inputs.total_tokens            = inputs.attention_inputs.total_tokens;
     for (auto& [tag, tagged_inputs] : py_model_inputs_.attention_inputs_by_tag) {
         (void)tag;
         tagged_inputs.context_total_kv_length = inputs.attention_inputs.context_total_kv_length;
+        tagged_inputs.context_total_kv_length_device = inputs.attention_inputs.context_total_kv_length_device;
         tagged_inputs.total_tokens            = inputs.attention_inputs.total_tokens;
     }
 
@@ -550,9 +553,9 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     // stream, so it never blocks on kernels enqueued after the copies (fills,
     // dummy-row installs) that do not feed the host mirrors.
     torch::Event host_mirror_copy_event = cuda_graph::makeGraphEvent();
-    auto         stridedCopyHost        = [&pending_host_mirror_d2h, &host_mirror_copy_event](const torch::Tensor& src,
+    auto         stridedCopyHost        = [this, &pending_host_mirror_d2h, &host_mirror_copy_event](const torch::Tensor& src,
                                                                                torch::Tensor&       dst) {
-        if (!dst.defined() || dst.is_cuda()) {
+        if (device_attention_metadata_ || !dst.defined() || dst.is_cuda()) {
             return;
         }
         if (!src.defined() || src.numel() <= 0) {
@@ -849,7 +852,9 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     // NOTE: we do H2H after D2D copies to let GPU finish the D2D copies as soon as possible,
     // so that the GPU can start the kernel launch as soon as possible.
 
-    {
+    // Only explicitly opted-in backends may ignore host mirrors. Their
+    // prepare hook and captured kernels consume the refreshed device tensors.
+    if (!device_attention_metadata_) {
         RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(host_mirror_copy)");
 
         // H2H copies (common to both modes)
@@ -939,7 +944,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                 optimizedCopyAsync(generation_prefill_cuda_graph_padding_offset_host_,
                                    captured_attn.padding_offset,
                                    state.graph_token_capacity * sizeof(int32_t));
-                captured_attn.context_total_kv_length = state.graph_token_capacity;
+                captured_attn.setContextTotalKvLength(state.graph_token_capacity);
             } else {
                 if (isEmbeddingStylePrefillCudaGraph()) {
                     // This loop consumes input_lengths on the CPU. When the live tensor is
@@ -1026,7 +1031,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
 
     // Keep the host mirrors consistent with the device-side replay contract.
     // CUDA/HIP device tails were already prepared by the single fused launch above.
-    if (has_padded_rows && is_target_verify_) {
+    if (!device_attention_metadata_ && has_padded_rows && is_target_verify_) {
         py_model_inputs_.attention_inputs.prefix_lengths.slice(0, state.current_batch_size, selected_graph_batch_size)
             .fill_(0);
         py_model_inputs_.attention_inputs.input_lengths.slice(0, state.current_batch_size, selected_graph_batch_size)
@@ -1057,7 +1062,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
             .slice(0, state.current_batch_size, selected_graph_batch_size)
             .fill_(num_tokens_per_bs_);
 #endif
-    } else if (has_padded_rows && is_prefill_cuda_graph_mode_ && !isGenerationPrefillCudaGraph()) {
+    } else if (!device_attention_metadata_ && has_padded_rows && is_prefill_cuda_graph_mode_ && !isGenerationPrefillCudaGraph()) {
         py_model_inputs_.attention_inputs.prefix_lengths.slice(0, state.current_batch_size, selected_graph_batch_size)
             .fill_(0);
         py_model_inputs_.attention_inputs.input_lengths.slice(0, state.current_batch_size, selected_graph_batch_size)

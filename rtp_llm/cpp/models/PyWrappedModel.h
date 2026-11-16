@@ -155,6 +155,7 @@ private:
 
     // Member variables (formerly inherited from GptModel)
     const rtp_llm::ExecProperties                   device_props_;
+    bool                                            device_attention_metadata_{false};
     const DSparkModelRole                           dspark_model_role_;
     const bool                                      track_cache_store_completion_;
     const bool                                      owns_py_model_;
@@ -403,6 +404,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         RTP_LLM_LOG_ERROR("Python model initialize failed:\n%s", e.what());
         throw;
     }
+    device_attention_metadata_ = py::hasattr(py_model_, "supports_device_attention_metadata")
+                                 && py_model_.attr("supports_device_attention_metadata")().cast<bool>();
     // Registration enables the handler; only batches with selected prefill rows invoke it.
     if (py::hasattr(py_model_, "custom_output_handler")) {
         initializeCustomOutput();
