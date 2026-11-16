@@ -18,6 +18,19 @@ from rtp_llm.utils import backend_registry
 from rtp_llm.utils.backend_registry import register_backend_hook
 
 
+class ServerHelpTest(TestCase):
+    def test_help_formats_all_argument_descriptions(self):
+        from rtp_llm.server.server_args import server_args
+
+        output = io.StringIO()
+        with patch.dict(os.environ, {}, clear=True), patch("sys.stdout", output):
+            with self.assertRaises(SystemExit) as result:
+                server_args.setup_args(["--help"])
+        self.assertEqual(result.exception.code, 0)
+        self.assertIn("10%", output.getvalue())
+        self.assertIn("--record_decode_sample_rate", output.getvalue())
+
+
 class AllReduceArgumentsTest(TestCase):
     def test_default_auto_and_retired_environment(self):
         from rtp_llm.server.server_args import server_args
