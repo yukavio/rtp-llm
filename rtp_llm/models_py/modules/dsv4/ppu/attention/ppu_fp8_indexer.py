@@ -25,10 +25,11 @@ class PpuFP8Indexer(PpuFP4Indexer):
         return self._score(q, (k, ks), weights, starts, ends, clean_logits=False)
 
     def _paged_score(self, q, qs, weights, table, lengths, width):
-        from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8._indexer_score import fp8_paged_indexer_score
-
-        return fp8_paged_indexer_score(
-            q.reshape(-1, 1, self.n_heads, 128), weights,
-            self._kv_pool_view.view(-1, 132), table, lengths,
-            self._kv_eb, width,
+        return kernels.paged_score(
+            q.reshape(-1, 1, self.n_heads, 128),
+            weights,
+            self._kv_pool_view,
+            table,
+            lengths,
+            width,
         )
