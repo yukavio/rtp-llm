@@ -231,6 +231,51 @@ py_test(
     tags = ["manual", "gpu", "ppu"],
 )
 
+# The isolated deep_gemm_w4a8 runtime must be supplied through PYTHONPATH.
+py_test(
+    name = "w4a8_moe_test",
+    srcs = ["test_w4a8_moe.py", "ppu_test_main.py"],
+    main = "ppu_test_main.py",
+    args = ["--devices", "1", "$(location test_w4a8_moe.py)"],
+    env = {"GPU_COUNT": "1"},
+    data = ["//rtp_llm/models_py:ppu_sources"],
+    deps = [":ppu_test_runtime", "//rtp_llm:device", "//rtp_llm/models_py:models", "//rtp_llm:torch"],
+    tags = ["manual", "local", "gpu", "M890P"],
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
+    name = "w4a8_deepep_test",
+    srcs = ["test_mxfp4_deepep.py", "ppu_test_main.py"],
+    main = "ppu_test_main.py",
+    args = ["--devices", "8", "$(location test_mxfp4_deepep.py)"],
+    env = {
+        "GPU_COUNT": "8",
+        "RTP_PPU_EP_TEST_WORLD_SIZE": "8",
+        "RTP_PPU_MOE_TEST_ACTIVATION": "fp8",
+        "RTP_PPU_MOE_TEST_HINT": "batch",
+        "RTP_PPU_MOE_TEST_MASK": "1",
+        "RTP_PPU_MOE_TEST_TILE": "auto",
+    },
+    data = ["//rtp_llm/models_py:ppu_sources"],
+    deps = [":ppu_test_runtime", "//rtp_llm:device", "//rtp_llm/models_py:models", "//rtp_llm:torch"],
+    tags = ["manual", "local", "gpu", "M890P"],
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+test_suite(
+    name = "dsv4_ppu_w4a8_tests",
+    tags = ["manual"],
+    tests = [":w4a8_moe_test", ":w4a8_deepep_test"],
+    visibility = ["//visibility:public"],
+)
+
 py_test(
     name = "decode_shared_expert_test",
     srcs = ["test_decode_shared_expert.py"],

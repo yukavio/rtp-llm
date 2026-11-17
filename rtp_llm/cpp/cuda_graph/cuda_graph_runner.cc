@@ -2069,6 +2069,10 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     {
         // sync before capture
         cuda_graph::graphDeviceSynchronize();
+        // Eager warmup uses the regular allocator pool. Capture allocates in
+        // its private pool and cannot reclaim those idle blocks on OOM while
+        // capture is active. Release them before entering the capture session.
+        cuda_graph::graphEmptyCache();
 
         auto&               graph               = graph_instances_[key].graph_;
         std::string         output_dot_filename = "";

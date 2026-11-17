@@ -59,6 +59,16 @@ source into a fresh build directory and leaves the existing packages in place.
 Run the manual M890P numerical tests in `test/test_w4a8_moe.py`, plus real
 EP dispatch/Graph and model comparisons, before qualifying this option.
 
+On an exclusively allocated eight-device M890P worker, the corresponding
+manual Bazel suite runs both the single-device arithmetic tests and the real
+EP8 test. Missing devices/dependencies or skipped tests fail the run:
+
+```bash
+bazel test --config=ppu --local_test_jobs=1 \
+  --test_env=PYTHONPATH="$PWD/deepgemm-runtime" \
+  //rtp_llm/models_py/modules/dsv4/ppu/test:dsv4_ppu_w4a8_tests
+```
+
 The native mixed E4M3/E5M2 MMA does not give full FP32 accumulation accuracy
 for every input. On M890P, a K4096 constant maximum-payload test produces
 0.94140625 instead of 1 in both the source build and the reference package;

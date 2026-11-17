@@ -38,6 +38,39 @@ class CompiledWarmupModel:
 
 
 class TestCudaGraphCompiledWarmup(unittest.TestCase):
+    def test_idle_warmup_storage_is_released_before_capture(self) -> None:
+        class TemporaryWorkspaceModel:
+            def __init__(self):
+                self.warm_reserved = []
+                self.capture_reserved = []
+
+            def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
+                return None
+
+            def forward(self, inputs, fmha_impl=None):
+                capturing = torch.cuda.is_current_stream_capturing()
+                if capturing:
+                    self.capture_reserved.append(torch.cuda.memory_reserved())
+                # The regular pool's idle workspace cannot satisfy an
+                # allocation in the capture pool. It must be released before
+                # capture, when allocator OOM recovery is still legal.
+                temporary = torch.empty(
+                    64 * 1024 * 1024, device="cuda", dtype=torch.uint8
+                )
+                temporary.fill_(1)
+                if not capturing:
+                    self.warm_reserved.append(torch.cuda.memory_reserved())
+                return PyModelOutputs(inputs.input_hiddens + 1)
+
+        model = TemporaryWorkspaceModel()
+        runner = CudaGraphRunner()
+        runner.init_decode(model, HIDDEN_SIZE, 64, 1, [1])
+        self.assertEqual(len(model.capture_reserved), 1)
+        self.assertTrue(model.warm_reserved)
+        self.assertGreaterEqual(
+            min(model.warm_reserved) - model.capture_reserved[0], 32 * 1024 * 1024
+        )
+
     def test_stream_owned_backend_is_warmed_on_capture_stream(self) -> None:
         class StreamOwnedModel:
             def __init__(self):
