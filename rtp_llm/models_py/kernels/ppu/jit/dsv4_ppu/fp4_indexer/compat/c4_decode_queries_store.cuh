@@ -21,7 +21,7 @@ SGL_DEVICE int32_t c4_metadata(const void* ptr, int64_t index) {
   return static_cast<const int32_t*>(ptr)[index];
 }
 
-template <bool kUsePDL, int kQueries, int kInt64Mask>
+template <bool kUsePDL, int kQueries, int kInt64Mask, bool kFp8 = false>
 __global__ __launch_bounds__(128, 4) void c4_decode_queries_store(
     const __grid_constant__ C4DecodeQueriesParams params) {
   using Trait = C4Trait<128>;
@@ -68,8 +68,13 @@ __global__ __launch_bounds__(128, 4) void c4_decode_queries_store(
       store.handle = &plan;
       store.out_loc = &slot;
       store.num_tokens = 1;
-      norm_rope_store_indexer_fp4<float, ForwardMode::CompressDecode, 6, kUsePDL, true>(
-          store, 0, compressed);
+      if constexpr (kFp8) {
+        norm_rope_store_indexer_fp8<float, ForwardMode::CompressDecode, 6, kUsePDL, true>(
+            store, 0, compressed);
+      } else {
+        norm_rope_store_indexer_fp4<float, ForwardMode::CompressDecode, 6, kUsePDL, true>(
+            store, 0, compressed);
+      }
     }
     __syncwarp();
   }
@@ -84,7 +89,7 @@ void c4_verify_metadata(tvm::ffi::TensorView tensor, host::SymbolicSize& rows, h
   }
 }
 
-template <bool kUsePDL, int kQueries, int kInt64Mask>
+template <bool kUsePDL, int kQueries, int kInt64Mask, bool kFp8 = false>
 struct FusedC4DecodeQueriesStore {
   static void forward(
       tvm::ffi::TensorView state, tvm::ffi::TensorView input, tvm::ffi::TensorView ape,
@@ -94,7 +99,7 @@ struct FusedC4DecodeQueriesStore {
       tvm::ffi::TensorView block_table, int32_t state_entries, int32_t state_tokens,
       tvm::ffi::TensorView cache) {
     using namespace host;
-    static_assert(kQueries >= 2 && kQueries <= 4);
+    static_assert(kQueries >= 2 && kQueries <= (kFp8 ? 6 : 4));
     auto batch = SymbolicSize{"batch"};
     auto device = SymbolicDevice{};
     device.set_options<kDLCUDA>();
@@ -103,7 +108,7 @@ struct FusedC4DecodeQueriesStore {
     TensorMatcher({8, 128}).with_dtype<float>().with_device(device).verify(ape);
     TensorMatcher({128}).with_dtype<float>().with_device(device).verify(weight);
     TensorMatcher({-1, 64}).with_dtype<float>().with_device(device).verify(freqs);
-    TensorMatcher({-1, 4352}).with_dtype<uint8_t>().with_device(device).verify(cache);
+    TensorMatcher({-1, 64 * (kFp8 ? 132 : 68)}).with_dtype<uint8_t>().with_device(device).verify(cache);
     auto rows = SymbolicSize{"tokens"};
     rows.set_value(batch.unwrap() * kQueries);
     c4_verify_metadata<(kInt64Mask & 1) != 0>(positions, rows, device);
@@ -132,7 +137,7 @@ struct FusedC4DecodeQueriesStore {
         .state_entries = state_entries, .state_tokens = state_tokens,
     };
     LaunchKernel(div_ceil(n, 4u), 128, device.unwrap()).enable_pdl(kUsePDL)(
-        c4_decode_queries_store<kUsePDL, kQueries, kInt64Mask>, params);
+        c4_decode_queries_store<kUsePDL, kQueries, kInt64Mask, kFp8>, params);
   }
 };
 }  // namespace

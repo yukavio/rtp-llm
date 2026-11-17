@@ -10,6 +10,10 @@ from rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_fp4_indexer import (
 class PpuFP8Compressor(PpuFP4Compressor):
     CACHE_ENTRY_BYTES = 132
     _norm_rope_store = staticmethod(kernels.norm_rope_store)
+    _compress_decode_store = staticmethod(kernels.compress4_decode_store)
+    _project_decode_queries_store = staticmethod(
+        kernels.project_compress4_decode_queries_store
+    )
 
 
 class PpuFP8Indexer(PpuFP4Indexer):

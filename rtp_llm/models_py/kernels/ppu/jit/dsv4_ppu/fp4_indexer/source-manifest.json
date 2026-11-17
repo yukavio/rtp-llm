@@ -74,7 +74,7 @@
   },
   "sources": {
     "compat/c4_decode_v2.cuh": "e7f00b9572eebf789a2b5aa5b43436fb7d4a07f7c5f33656bfe306e9304ad7ca",
-    "compat/fused_norm_rope_v2.cuh": "5fa270749e01cae394a7731565ee97c90a2b5d344a5bdccaa6007d0fca6e6722",
+    "compat/fused_norm_rope_v2.cuh": "699701300655e7d39357bcfe57ffbc23e829fa99c9ed155d9a4b1896c425cf8a",
     "compat/sgl_kernel/tensor.h": "f971fbc9e6740f4d066764e8c88a4d8bacada5a4c607dc1170bc847517f1fcb0",
     "compat/topk_decode_v1.cuh": "ef1a3f04ad16d206508f503c17f477afc1f78d8cca045f34bd6f6db9345677a1",
     "compat/topk_prefill_bf16.cuh": "0d79ac1a575a5edb075d46c11a4a15841b5805e69ea635c75ffd78b472401db1",
@@ -94,8 +94,20 @@
     "include/sgl_kernel/warp.cuh": "3254a491733811043f923423ea7eefec2d2697311bb520a0553ef3cdb177db57",
     "compat/topk_prefill_bf16_checked.cuh": "679187d5776c5d0314514f0bd6f33870389d00e41446d0664c2fb5d4cb8adacf",
     "compat/topk_exact.cuh": "a2c857279818321bb466d3fc4733ddcd33ca79a13b9b4b4ed97c9659a0920134",
-    "compat/c4_decode_store.cuh": "de2e14f5bb41ce8b247c79463b96b4cf3c107cb107f078d600e0df49ef24ccb9",
-    "compat/c4_decode_queries_store.cuh": "966a122c48c345ebc8f96d3d8b0dcf60188a6fd678d9f96efba432be906e5519",
-    "compat/mtp_input_quant.cuh": "c0b28ed3cec65cc2aab2f40d7b7aa3e971408043fab98e8dcd10cf011a066412"
-  }
+    "compat/c4_decode_store.cuh": "3a3df08d29f0826a24fcfa78fa5aa98da6ebd3df08ce762f4ed4325e3a0eb737",
+    "compat/c4_decode_queries_store.cuh": "6902295efe7f79e3d5d62e5d86fe0731f2fe40bd6197896dfe941d42693d9c5d",
+    "compat/mtp_input_quant.cuh": "c0b28ed3cec65cc2aab2f40d7b7aa3e971408043fab98e8dcd10cf011a066412",
+    "patches/fp8_c4_fusion.patch": "aaabea94cf0c6703a83715d14dde0d7812a8d22db2f1e239efb7610c241e9e64"
+  },
+  "rtp_compat_updates": [
+    {
+      "base_commit": "45f2d038613375697cb3c1af649fb1a89676ae1b",
+      "patch": "patches/fp8_c4_fusion.patch",
+      "base_sources": {
+        "compat/fused_norm_rope_v2.cuh": "5fa270749e01cae394a7731565ee97c90a2b5d344a5bdccaa6007d0fca6e6722",
+        "compat/c4_decode_store.cuh": "de2e14f5bb41ce8b247c79463b96b4cf3c107cb107f078d600e0df49ef24ccb9",
+        "compat/c4_decode_queries_store.cuh": "966a122c48c345ebc8f96d3d8b0dcf60188a6fd678d9f96efba432be906e5519"
+      }
+    }
+  ]
 }

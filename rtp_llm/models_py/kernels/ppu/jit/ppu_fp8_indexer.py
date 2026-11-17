@@ -1,11 +1,19 @@
 """FP8 Indexer adapters for the frozen SGLang query and cache kernels."""
 
-from functools import lru_cache
+from functools import lru_cache, partial
 
 import torch
 import triton
 
 from rtp_llm.models_py.kernels.ppu.jit.sglang_jit import load_sglang_kernel
+from rtp_llm.models_py.kernels.ppu.jit import ppu_fp4_indexer as c4_kernels
+
+compress4_decode_store = partial(
+    c4_kernels.compress4_decode_store, cache_entry_bytes=132
+)
+project_compress4_decode_queries_store = partial(
+    c4_kernels.project_compress4_decode_queries_store, cache_entry_bytes=132
+)
 
 
 @lru_cache(maxsize=None)

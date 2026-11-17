@@ -1,0 +1,177 @@
+--- a/compat/fused_norm_rope_v2.cuh
++++ b/compat/fused_norm_rope_v2.cuh
+@@ -64,8 +64,9 @@
+ // Each warp's 32 lanes cover the full 128-elem head_dim (kVecSize = 4 each).
+ // Cache layout: 132 bytes/token (128 fp8 nope + 4 fp32 scale).
+ // ----------------------------------------------------------------------------
+-template <typename DType, ForwardMode kMode, int32_t kPageBits, bool kUsePDL>
+-INDEXER_KERNEL void fused_norm_rope_indexer(const __grid_constant__ FusedNormRopeStoreParams params) {
++template <typename DType, ForwardMode kMode, int32_t kPageBits, bool kUsePDL, bool kInlineInput = false>
++SGL_DEVICE void norm_rope_store_indexer_fp8(
++    const FusedNormRopeStoreParams params, uint32_t work_id, device::AlignedVector<DType, 4> compressed) {
+   using namespace device;
+   constexpr auto CompressExtend = ForwardMode::CompressExtend;
+     constexpr auto CompressDecode = ForwardMode::CompressDecode;
+@@ -81,15 +82,12 @@
+   using Storage = AlignedVector<DType, kVecSize>;
+   using Float4 = AlignedVector<float, kVecSize>;
+ 
+-  const auto warp_id = threadIdx.x / kWarpThreads;
+   const auto lane_id = threadIdx.x % kWarpThreads;
+-  const auto work_id = blockIdx.x * kNumWarps + warp_id;
+   // Lanes whose 4-elem pack lies in the rope tail (= last `kRopeSize` packs).
+   const bool is_rope_lane = lane_id >= kWarpThreads - kRopeSize;
+ 
+   if (work_id >= params.num_tokens) return;
+ 
+-  const auto input = static_cast<DType*>(params.input) + work_id * kHeadDim;
+   int32_t position;
+   int32_t out_loc;
+   if constexpr (kMode == CompressExtend) {
+@@ -114,7 +112,12 @@
+   // part 1: norm
+   {
+     Storage input_vec, weight_vec;
+-    input_vec.load(input, lane_id);
++    if constexpr (kInlineInput) {
++      input_vec = compressed;
++    } else {
++      const auto input = static_cast<DType*>(params.input) + work_id * kHeadDim;
++      input_vec.load(input, lane_id);
++    }
+     weight_vec.load(params.weight, lane_id);
+     if (is_rope_lane) freq.load(freqs_cis, lane_id - (kWarpThreads - kRopeSize));
+ 
+@@ -219,6 +222,13 @@
+     // The single fp32 scale is identical across all lanes -- write from any lane.
+     if (lane_id == 0) reinterpret_cast<float*>(scale_ptr)[0] = scale;
+   }
++}
++
++template <typename DType, ForwardMode kMode, int32_t kPageBits, bool kUsePDL>
++INDEXER_KERNEL void fused_norm_rope_indexer(const __grid_constant__ FusedNormRopeStoreParams params) {
++  const auto work_id = blockIdx.x * kNumWarps + threadIdx.x / device::kWarpThreads;
++  norm_rope_store_indexer_fp8<DType, kMode, kPageBits, kUsePDL>(
++      params, work_id, device::AlignedVector<DType, 4>{});
+ }
+ 
+ template <typename DType, ForwardMode kMode, int32_t kPageBits, bool kUsePDL, bool kInlineInput = false>
+--- a/compat/c4_decode_store.cuh
++++ b/compat/c4_decode_store.cuh
+@@ -1,4 +1,4 @@
+-// Decode-only C4 state update and FP4 cache epilogue. One warp owns a request.
++// Decode-only C4 state update and FP4/FP8 cache epilogue. One warp owns a request.
+ #include "c4_decode_v2.cuh"
+ #include "fused_norm_rope_v2.cuh"
+ 
+@@ -8,7 +8,7 @@
+   FusedNormRopeStoreParams store;
+ };
+ 
+-template <bool kUsePDL>
++template <bool kUsePDL, bool kFp8 = false>
+ __global__ __launch_bounds__(128, 4) void c4_decode_store(const __grid_constant__ C4DecodeStoreParams params) {
+   using Trait = C4Trait<128>;
+   const uint32_t row = (blockIdx.x * blockDim.x + threadIdx.x) / device::kWarpThreads;
+@@ -26,12 +26,17 @@
+         state + plan.read_page_0 * Trait::kPageElementSize,
+         state + plan.read_page_1 * Trait::kPageElementSize, input,
+         static_cast<const float*>(params.compress.score_bias), plan.seq_len > 4, 8);
+-    norm_rope_store_indexer_fp4<float, ForwardMode::CompressDecode, 6, kUsePDL, true>(
+-        params.store, row, compressed);
++    if constexpr (kFp8) {
++      norm_rope_store_indexer_fp8<float, ForwardMode::CompressDecode, 6, kUsePDL, true>(
++          params.store, row, compressed);
++    } else {
++      norm_rope_store_indexer_fp4<float, ForwardMode::CompressDecode, 6, kUsePDL, true>(
++          params.store, row, compressed);
++    }
+   }
+ }
+ 
+-template <bool kUsePDL>
++template <bool kUsePDL, bool kFp8 = false>
+ struct FusedC4DecodeStore {
+   static void forward(
+       tvm::ffi::TensorView state, tvm::ffi::TensorView input, tvm::ffi::TensorView ape,
+@@ -48,7 +53,7 @@
+     TensorMatcher({128}).with_dtype<float>().with_device(device).verify(weight);
+     TensorMatcher({-1, 64}).with_dtype<float>().with_device(device).verify(freqs);
+     TensorMatcher({rows}).with_dtype<int32_t>().with_device(device).verify(slots);
+-    TensorMatcher({-1, 4352}).with_dtype<uint8_t>().with_device(device).verify(cache);
++    TensorMatcher({-1, 64 * (kFp8 ? 132 : 68)}).with_dtype<uint8_t>().with_device(device).verify(cache);
+     const auto n = static_cast<uint32_t>(rows.unwrap());
+     if (!n) return;
+     const C4DecodeStoreParams params{
+@@ -59,7 +64,7 @@
+                   .out_loc = static_cast<const int32_t*>(slots.data_ptr()),
+                   .kvcache = static_cast<uint8_t*>(cache.data_ptr()), .eps = eps, .compress_ratio = 4, .num_tokens = n},
+     };
+-    LaunchKernel(div_ceil(n, 4u), 128, device.unwrap()).enable_pdl(kUsePDL)(c4_decode_store<kUsePDL>, params);
++    LaunchKernel(div_ceil(n, 4u), 128, device.unwrap()).enable_pdl(kUsePDL)(c4_decode_store<kUsePDL, kFp8>, params);
+   }
+ };
+ }  // namespace
+--- a/compat/c4_decode_queries_store.cuh
++++ b/compat/c4_decode_queries_store.cuh
+@@ -21,7 +21,7 @@
+   return static_cast<const int32_t*>(ptr)[index];
+ }
+ 
+-template <bool kUsePDL, int kQueries, int kInt64Mask>
++template <bool kUsePDL, int kQueries, int kInt64Mask, bool kFp8 = false>
+ __global__ __launch_bounds__(128, 4) void c4_decode_queries_store(
+     const __grid_constant__ C4DecodeQueriesParams params) {
+   using Trait = C4Trait<128>;
+@@ -68,8 +68,13 @@
+       store.handle = &plan;
+       store.out_loc = &slot;
+       store.num_tokens = 1;
+-      norm_rope_store_indexer_fp4<float, ForwardMode::CompressDecode, 6, kUsePDL, true>(
+-          store, 0, compressed);
++      if constexpr (kFp8) {
++        norm_rope_store_indexer_fp8<float, ForwardMode::CompressDecode, 6, kUsePDL, true>(
++            store, 0, compressed);
++      } else {
++        norm_rope_store_indexer_fp4<float, ForwardMode::CompressDecode, 6, kUsePDL, true>(
++            store, 0, compressed);
++      }
+     }
+     __syncwarp();
+   }
+@@ -84,7 +89,7 @@
+   }
+ }
+ 
+-template <bool kUsePDL, int kQueries, int kInt64Mask>
++template <bool kUsePDL, int kQueries, int kInt64Mask, bool kFp8 = false>
+ struct FusedC4DecodeQueriesStore {
+   static void forward(
+       tvm::ffi::TensorView state, tvm::ffi::TensorView input, tvm::ffi::TensorView ape,
+@@ -94,7 +99,7 @@
+       tvm::ffi::TensorView block_table, int32_t state_entries, int32_t state_tokens,
+       tvm::ffi::TensorView cache) {
+     using namespace host;
+-    static_assert(kQueries >= 2 && kQueries <= 4);
++    static_assert(kQueries >= 2 && kQueries <= (kFp8 ? 6 : 4));
+     auto batch = SymbolicSize{"batch"};
+     auto device = SymbolicDevice{};
+     device.set_options<kDLCUDA>();
+@@ -103,7 +108,7 @@
+     TensorMatcher({8, 128}).with_dtype<float>().with_device(device).verify(ape);
+     TensorMatcher({128}).with_dtype<float>().with_device(device).verify(weight);
+     TensorMatcher({-1, 64}).with_dtype<float>().with_device(device).verify(freqs);
+-    TensorMatcher({-1, 4352}).with_dtype<uint8_t>().with_device(device).verify(cache);
++    TensorMatcher({-1, 64 * (kFp8 ? 132 : 68)}).with_dtype<uint8_t>().with_device(device).verify(cache);
+     auto rows = SymbolicSize{"tokens"};
+     rows.set_value(batch.unwrap() * kQueries);
+     c4_verify_metadata<(kInt64Mask & 1) != 0>(positions, rows, device);
+@@ -132,7 +137,7 @@
+         .state_entries = state_entries, .state_tokens = state_tokens,
+     };
+     LaunchKernel(div_ceil(n, 4u), 128, device.unwrap()).enable_pdl(kUsePDL)(
+-        c4_decode_queries_store<kUsePDL, kQueries, kInt64Mask>, params);
++        c4_decode_queries_store<kUsePDL, kQueries, kInt64Mask, kFp8>, params);
+   }
+ };
+ }  // namespace

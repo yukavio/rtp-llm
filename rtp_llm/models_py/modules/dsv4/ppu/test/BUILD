@@ -81,6 +81,19 @@ py_test(
 )
 
 py_test(
+    name = "fp8_indexer_fusions_test",
+    srcs = ["test_fp8_indexer_fusions.py"],
+    main = "test_fp8_indexer_fusions.py",
+    data = ["//rtp_llm/models_py:ppu_sources"],
+    deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"] + select({"@//:using_ppu": [":ppu_test_runtime"], "//conditions:default": []}),
+    tags = ["manual", "ppu"],
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
     name = "platform_boundary_test",
     srcs = ["test_platform_boundary.py"],
     main = "test_platform_boundary.py",
@@ -627,6 +640,7 @@ test_suite(
         ":decode_attention_test",
         ":decode_shared_expert_test",
         ":decode_fusions_test",
+        ":fp8_indexer_fusions_test",
         ":decode_metadata_graph_test",
         ":decode_state_slots_test",
         ":mtp_input_test",

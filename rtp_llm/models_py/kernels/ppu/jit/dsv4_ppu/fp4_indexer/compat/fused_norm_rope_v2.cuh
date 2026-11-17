@@ -64,8 +64,9 @@ enum class ForwardMode : bool {
 // Each warp's 32 lanes cover the full 128-elem head_dim (kVecSize = 4 each).
 // Cache layout: 132 bytes/token (128 fp8 nope + 4 fp32 scale).
 // ----------------------------------------------------------------------------
-template <typename DType, ForwardMode kMode, int32_t kPageBits, bool kUsePDL>
-INDEXER_KERNEL void fused_norm_rope_indexer(const __grid_constant__ FusedNormRopeStoreParams params) {
+template <typename DType, ForwardMode kMode, int32_t kPageBits, bool kUsePDL, bool kInlineInput = false>
+SGL_DEVICE void norm_rope_store_indexer_fp8(
+    const FusedNormRopeStoreParams params, uint32_t work_id, device::AlignedVector<DType, 4> compressed) {
   using namespace device;
   constexpr auto CompressExtend = ForwardMode::CompressExtend;
     constexpr auto CompressDecode = ForwardMode::CompressDecode;
@@ -81,15 +82,12 @@ INDEXER_KERNEL void fused_norm_rope_indexer(const __grid_constant__ FusedNormRop
   using Storage = AlignedVector<DType, kVecSize>;
   using Float4 = AlignedVector<float, kVecSize>;
 
-  const auto warp_id = threadIdx.x / kWarpThreads;
   const auto lane_id = threadIdx.x % kWarpThreads;
-  const auto work_id = blockIdx.x * kNumWarps + warp_id;
   // Lanes whose 4-elem pack lies in the rope tail (= last `kRopeSize` packs).
   const bool is_rope_lane = lane_id >= kWarpThreads - kRopeSize;
 
   if (work_id >= params.num_tokens) return;
 
-  const auto input = static_cast<DType*>(params.input) + work_id * kHeadDim;
   int32_t position;
   int32_t out_loc;
   if constexpr (kMode == CompressExtend) {
@@ -114,7 +112,12 @@ INDEXER_KERNEL void fused_norm_rope_indexer(const __grid_constant__ FusedNormRop
   // part 1: norm
   {
     Storage input_vec, weight_vec;
-    input_vec.load(input, lane_id);
+    if constexpr (kInlineInput) {
+      input_vec = compressed;
+    } else {
+      const auto input = static_cast<DType*>(params.input) + work_id * kHeadDim;
+      input_vec.load(input, lane_id);
+    }
     weight_vec.load(params.weight, lane_id);
     if (is_rope_lane) freq.load(freqs_cis, lane_id - (kWarpThreads - kRopeSize));
 
@@ -219,6 +222,13 @@ INDEXER_KERNEL void fused_norm_rope_indexer(const __grid_constant__ FusedNormRop
     // The single fp32 scale is identical across all lanes -- write from any lane.
     if (lane_id == 0) reinterpret_cast<float*>(scale_ptr)[0] = scale;
   }
+}
+
+template <typename DType, ForwardMode kMode, int32_t kPageBits, bool kUsePDL>
+INDEXER_KERNEL void fused_norm_rope_indexer(const __grid_constant__ FusedNormRopeStoreParams params) {
+  const auto work_id = blockIdx.x * kNumWarps + threadIdx.x / device::kWarpThreads;
+  norm_rope_store_indexer_fp8<DType, kMode, kPageBits, kUsePDL>(
+      params, work_id, device::AlignedVector<DType, 4>{});
 }
 
 template <typename DType, ForwardMode kMode, int32_t kPageBits, bool kUsePDL, bool kInlineInput = false>

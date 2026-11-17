@@ -40,10 +40,17 @@ Indexer pages change from 68 to 132 bytes per compressed token, and existing
 pages cannot be reused across modes.
 
 The FP8 path retains PPU FP32 compression, chronological speculative-state
-updates, stream joins and canonical TopK ordering. FP4-only fused compression
-stores fall back to the separate compression and FP8 store kernels. The manual
-M890P `fp8_indexer_test` target covers cache transfers, changing-input Graph
-replay and paged/non-paged score agreement with an exact integer oracle.
+updates, stream joins and canonical TopK ordering. With
+`DSV4_PPU_DECODE_FUSIONS=1`, compression and cache writes share a kernel.
+Ordered multi-query fusion supports up to six speculative queries; five or
+six queries require a 16-entry state ring. Unsupported layouts use separate
+compression and store kernels. Each query keeps its original FP32 projection
+GEMM, preserving its reduction order.
+
+The manual M890P `fp8_indexer_test` target covers cache transfers,
+changing-input Graph replay and paged/non-paged score agreement with an exact
+integer oracle. `fp8_indexer_fusions_test` compares state and cache bytes across
+Graph replay, ring boundaries, rollback, inactive rows and metadata layouts.
 These operator checks do not establish model-level accuracy or performance.
 
 ### Routed W4A8 experts

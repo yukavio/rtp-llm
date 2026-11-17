@@ -1,4 +1,4 @@
-// Decode-only C4 state update and FP4 cache epilogue. One warp owns a request.
+// Decode-only C4 state update and FP4/FP8 cache epilogue. One warp owns a request.
 #include "c4_decode_v2.cuh"
 #include "fused_norm_rope_v2.cuh"
 
@@ -8,7 +8,7 @@ struct C4DecodeStoreParams {
   FusedNormRopeStoreParams store;
 };
 
-template <bool kUsePDL>
+template <bool kUsePDL, bool kFp8 = false>
 __global__ __launch_bounds__(128, 4) void c4_decode_store(const __grid_constant__ C4DecodeStoreParams params) {
   using Trait = C4Trait<128>;
   const uint32_t row = (blockIdx.x * blockDim.x + threadIdx.x) / device::kWarpThreads;
@@ -26,12 +26,17 @@ __global__ __launch_bounds__(128, 4) void c4_decode_store(const __grid_constant_
         state + plan.read_page_0 * Trait::kPageElementSize,
         state + plan.read_page_1 * Trait::kPageElementSize, input,
         static_cast<const float*>(params.compress.score_bias), plan.seq_len > 4, 8);
-    norm_rope_store_indexer_fp4<float, ForwardMode::CompressDecode, 6, kUsePDL, true>(
-        params.store, row, compressed);
+    if constexpr (kFp8) {
+      norm_rope_store_indexer_fp8<float, ForwardMode::CompressDecode, 6, kUsePDL, true>(
+          params.store, row, compressed);
+    } else {
+      norm_rope_store_indexer_fp4<float, ForwardMode::CompressDecode, 6, kUsePDL, true>(
+          params.store, row, compressed);
+    }
   }
 }
 
-template <bool kUsePDL>
+template <bool kUsePDL, bool kFp8 = false>
 struct FusedC4DecodeStore {
   static void forward(
       tvm::ffi::TensorView state, tvm::ffi::TensorView input, tvm::ffi::TensorView ape,
@@ -48,7 +53,7 @@ struct FusedC4DecodeStore {
     TensorMatcher({128}).with_dtype<float>().with_device(device).verify(weight);
     TensorMatcher({-1, 64}).with_dtype<float>().with_device(device).verify(freqs);
     TensorMatcher({rows}).with_dtype<int32_t>().with_device(device).verify(slots);
-    TensorMatcher({-1, 4352}).with_dtype<uint8_t>().with_device(device).verify(cache);
+    TensorMatcher({-1, 64 * (kFp8 ? 132 : 68)}).with_dtype<uint8_t>().with_device(device).verify(cache);
     const auto n = static_cast<uint32_t>(rows.unwrap());
     if (!n) return;
     const C4DecodeStoreParams params{
@@ -59,7 +64,7 @@ struct FusedC4DecodeStore {
                   .out_loc = static_cast<const int32_t*>(slots.data_ptr()),
                   .kvcache = static_cast<uint8_t*>(cache.data_ptr()), .eps = eps, .compress_ratio = 4, .num_tokens = n},
     };
-    LaunchKernel(div_ceil(n, 4u), 128, device.unwrap()).enable_pdl(kUsePDL)(c4_decode_store<kUsePDL>, params);
+    LaunchKernel(div_ceil(n, 4u), 128, device.unwrap()).enable_pdl(kUsePDL)(c4_decode_store<kUsePDL, kFp8>, params);
   }
 };
 }  // namespace

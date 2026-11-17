@@ -3,6 +3,8 @@
 import torch
 import torch.nn.functional as F
 
+from rtp_llm.models_py.kernels.ppu.jit import ppu_fp4_indexer as c4_kernels
+
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.compressor import CompressorFP8, _linear_bf16_bf16_fp32
 from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.indexer import IndexerFP8
@@ -18,18 +20,18 @@ from rtp_llm.models_py.kernels.ppu.attention.ppu_inverse_rope import inverse_rop
 class PpuFP4Compressor(CompressorFP8):
     CACHE_ENTRY_BYTES = 68
     _norm_rope_store = staticmethod(norm_rope_store)
+    _compress_decode_store = staticmethod(c4_kernels.compress4_decode_store)
+    _project_decode_queries_store = staticmethod(
+        c4_kernels.project_compress4_decode_queries_store
+    )
 
     def try_forward_decode_queries(self, x, meta):
         """Use one warp per request for chronological MTP C4 state updates."""
-        if self.CACHE_ENTRY_BYTES != 68 or not getattr(self, "_fuse_decode_queries", False):
+        if not getattr(self, "_fuse_decode_queries", False):
             return False
         if self._state_pool_3d is None or self._kv_pool_view is None:
             return False
-        from rtp_llm.models_py.kernels.ppu.jit.ppu_fp4_indexer import (
-            project_compress4_decode_queries_store,
-        )
-
-        return project_compress4_decode_queries_store(
+        return self._project_decode_queries_store(
             self._state_pool_3d,
             x,
             self._wkv_wgate_fused,
@@ -112,10 +114,8 @@ class PpuFP4Compressor(CompressorFP8):
         plan, slots = build_decode_plan(
             meta, self._state_block_table, self._state_eb, self._state_tokens_per_block
         )
-        if self.CACHE_ENTRY_BYTES == 68 and getattr(self, "_fuse_decode_store", False):
-            from rtp_llm.models_py.kernels.ppu.jit.ppu_fp4_indexer import compress4_decode_store
-
-            if compress4_decode_store(
+        if getattr(self, "_fuse_decode_store", False):
+            if self._compress_decode_store(
                 self._state_pool_3d,
                 fused,
                 self.ape,

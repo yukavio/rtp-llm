@@ -31,6 +31,14 @@ def _module(kind, arch, parameter=0, canonical_topk=False):
             "c4_decode_queries_store.cuh",
             f"FusedC4DecodeQueriesStore<false,{parameter >> 5},{parameter & 31}>::forward",
         ),
+        "compress_decode_store_fp8": (
+            "c4_decode_store.cuh",
+            f"FusedC4DecodeStore<{pdl},true>::forward",
+        ),
+        "compress_decode_queries_store_fp8": (
+            "c4_decode_queries_store.cuh",
+            f"FusedC4DecodeQueriesStore<false,{parameter >> 5},{parameter & 31},true>::forward",
+        ),
         "store": (
             "fused_norm_rope_v2.cuh",
             f"FusedNormRopeKernel<fp32_t,128,64,{parameter},{pdl}>::forward_fp4",
@@ -51,6 +59,8 @@ def _module(kind, arch, parameter=0, canonical_topk=False):
         "compress_decode",
         "compress_decode_store",
         "compress_decode_queries_store",
+        "compress_decode_store_fp8",
+        "compress_decode_queries_store_fp8",
         "topk_decode",
     ):
         source = f"compat/{filename}"
@@ -104,9 +114,23 @@ def compress4_decode(state, kv_score, ape, plan):
 
 
 def compress4_decode_store(
-    state, kv_score, ape, plan, weight, eps, freqs, slots, cache, page_size
+    state,
+    kv_score,
+    ape,
+    plan,
+    weight,
+    eps,
+    freqs,
+    slots,
+    cache,
+    page_size,
+    *,
+    cache_entry_bytes=68,
 ):
     """Return False before launch when the original two-kernel path is needed."""
+    if cache_entry_bytes not in (68, 132):
+        return False
+    page_bytes = 64 * cache_entry_bytes
     tensors = (state, kv_score, ape, plan, weight, freqs, slots, cache)
     if not (
         kv_score.is_cuda
@@ -114,7 +138,7 @@ def compress4_decode_store(
         and kv_score.shape[1] == 512
         and page_size == 64
         and state.numel() % 2048 == 0
-        and cache.numel() % 4352 == 0
+        and cache.numel() % page_bytes == 0
         and all(t.is_contiguous() and t.device == kv_score.device for t in tensors)
         and all(t.dtype == torch.float32 for t in (state, kv_score, ape, weight, freqs))
         and plan.dtype == cache.dtype == torch.uint8
@@ -129,7 +153,12 @@ def compress4_decode_store(
         return False
     if kv_score.shape[0]:
         _module(
-            "compress_decode_store", torch.cuda.get_device_capability(kv_score.device)
+            (
+                "compress_decode_store_fp8"
+                if cache_entry_bytes == 132
+                else "compress_decode_store"
+            ),
+            torch.cuda.get_device_capability(kv_score.device),
         ).forward(
             state.view(-1, 4, 512),
             kv_score,
@@ -139,7 +168,7 @@ def compress4_decode_store(
             float(eps),
             freqs,
             slots,
-            cache.view(-1, 4352),
+            cache.view(-1, page_bytes),
         )
     return True
 
@@ -158,6 +187,8 @@ def project_compress4_decode_queries_store(
     state_tokens,
     cache,
     page_size,
+    *,
+    cache_entry_bytes=68,
 ):
     """Project MTP queries and fuse ordered C4 transitions for each request.
 
@@ -165,9 +196,15 @@ def project_compress4_decode_queries_store(
     changes the PPU reduction's rounding. Return False before any mutation
     for layouts outside the qualified decode contract.
     """
-    if x.ndim != 3 or x.shape[1] not in (2, 3, 4):
+    if cache_entry_bytes not in (68, 132):
+        return False
+    fp8 = cache_entry_bytes == 132
+    if x.ndim != 3 or not 2 <= x.shape[1] <= (6 if fp8 else 4):
         return False
     batch, width, hidden = x.shape
+    if width > 4 and state_entries != 16:
+        return False
+    page_bytes = 64 * cache_entry_bytes
     metadata = (meta.positions, meta.b_idx, meta.state_slots, meta.kv_slots)
     tensors = (state, x, projection_weight, ape, weight, freqs, cache, *metadata)
     if not (
@@ -175,11 +212,11 @@ def project_compress4_decode_queries_store(
         and 1 <= batch <= 32
         and hidden == 4096
         and page_size == 64
-        and state_entries in (8, 12)
+        and state_entries in ((8, 12, 16) if fp8 else (8, 12))
         and state_tokens > 0
         and state_tokens % 4 == 0
         and state.numel() % 2048 == 0
-        and cache.numel() % 4352 == 0
+        and cache.numel() % page_bytes == 0
         and all(t.is_contiguous() and t.device == x.device for t in tensors)
         and x.dtype == projection_weight.dtype == torch.bfloat16
         and projection_weight.shape == (512, hidden)
@@ -212,7 +249,11 @@ def project_compress4_decode_queries_store(
         (t.dtype == torch.int64) << i for i, t in enumerate((*metadata, block_table))
     )
     _module(
-        "compress_decode_queries_store",
+        (
+            "compress_decode_queries_store_fp8"
+            if fp8
+            else "compress_decode_queries_store"
+        ),
         torch.cuda.get_device_capability(x.device),
         (width << 5) | dtype_mask,
     ).forward(
@@ -226,7 +267,7 @@ def project_compress4_decode_queries_store(
         block_table,
         state_entries,
         state_tokens,
-        cache.view(-1, 4352),
+        cache.view(-1, page_bytes),
     )
     return True
 
