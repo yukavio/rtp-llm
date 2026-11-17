@@ -30,6 +30,22 @@ it does not install a package or establish runtime compatibility. Exactly
 one overlap mode is active per process: streamed dispatch and staged shared
 expert are alternatives, not composable.
 
+### FP8 Indexer
+
+`DSV4_PPU_INDEXER_DTYPE=fp8` selects E4M3 Indexer queries and keys, with
+FP32 query weights and scores. The default remains `fp4`. This option is
+independent of attention KV precision and routed-expert activation precision.
+Set the same value on Prefill and Decode and restart both roles: native
+Indexer pages change from 68 to 132 bytes per compressed token, and existing
+pages cannot be reused across modes.
+
+The FP8 path retains PPU FP32 compression, chronological speculative-state
+updates, stream joins and canonical TopK ordering. FP4-only fused compression
+stores fall back to the separate compression and FP8 store kernels. The manual
+M890P `fp8_indexer_test` target covers cache transfers, changing-input Graph
+replay and paged/non-paged score agreement with an exact integer oracle.
+These operator checks do not establish model-level accuracy or performance.
+
 ### Routed W4A8 experts
 
 `DSV4_PPU_MOE_ACTIVATION=fp8` selects per-token E4M3 activations with the

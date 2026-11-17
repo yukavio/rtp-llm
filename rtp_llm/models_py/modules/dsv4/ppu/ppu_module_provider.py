@@ -43,6 +43,9 @@ class PpuModuleProvider:
             dict(os.environ if execution_options is None else execution_options)
         )
         self._hca_split = False
+        from rtp_llm.models_py.modules.dsv4.ppu.manifest import resolve_indexer_mode
+
+        self.indexer_mode = resolve_indexer_mode(self.execution_options)
         self._moe_activation = self.execution_options.get(
             "DSV4_PPU_MOE_ACTIVATION", "fp4"
         )
@@ -192,7 +195,6 @@ class PpuModuleProvider:
             q, kv_s, weights, cu_start, cu_end, clean_logits
         )
 
-    indexer_mode = "FP4"
     owns_runtime_buffers = True
 
     def build_attention(self, default_factory, *args, **kwargs):
@@ -209,6 +211,10 @@ class PpuModuleProvider:
             return self._build_with_provider(
                 "attention", CommitOnlyAttentionFP8, *args, **kwargs
             )
+        if self.indexer_mode == "FP8":
+            from rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_fp8_indexer import PpuFP8Indexer
+
+            kwargs["indexer_factory"] = PpuFP8Indexer
         return self._build_with_provider("attention", PpuFP4Attention, *args, **kwargs)
 
     def build_moe(self, default_factory, *args, **kwargs):

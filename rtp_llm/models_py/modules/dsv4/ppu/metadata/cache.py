@@ -1,10 +1,13 @@
-"""PPU FP4 indexer layout using the existing opaque-cache descriptor API."""
+"""PPU indexer layout using the existing opaque-cache descriptor API."""
 
 from rtp_llm.models.dsv4_kv_cache import INDEXER_KV_TAG, INDEXER_STATE_TAG
 from rtp_llm.ops import OpaqueBlockEntryCountMode
 
 
-def configure_indexer_cache(model_config):
+def configure_indexer_cache(model_config, options=None):
+    from rtp_llm.models_py.modules.dsv4.ppu.manifest import resolve_indexer_mode
+
+    entry_bytes = 132 if resolve_indexer_mode(options) == "FP8" else 68
     # Called at load time: ModelFactory has now assigned the final MTP depth.
     gamma = int(model_config.gen_num_per_cycle)
     if gamma < 0:
@@ -13,8 +16,9 @@ def configure_indexer_cache(model_config):
     for layer in descs:
         for desc in layer:
             if desc.tag == INDEXER_KV_TAG:
-                # 128 packed E2M1 values and four UE8M0 scales.
-                desc.entry_elems = 68
+                # FP4: 64 packed bytes + four UE8M0 scales.
+                # FP8: 128 E4M3 bytes + one FP32 scale.
+                desc.entry_elems = entry_bytes
             elif desc.tag == INDEXER_STATE_TAG:
                 window = (1 + desc.state_ring_overlap) * desc.compression_ratio
                 raw = window + (gamma if desc.state_ring_include_gen_num_per_cycle else 0)

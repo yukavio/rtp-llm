@@ -108,17 +108,17 @@ class PpuFP4IndexerRequestSlicesTest(unittest.TestCase):
             "rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_fp4_indexer.F.linear",
             return_value=torch.zeros((5, 2), dtype=torch.bfloat16),
         ), patch(
-            "rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_fp4_indexer.quantize_q",
+            "rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_fp4_indexer.PpuFP4Indexer._quantize_q",
             return_value=(
                 torch.zeros((5, 2, 128), dtype=torch.int8),
                 torch.ones((5, 2), dtype=torch.int32),
                 torch.zeros((5, 2), dtype=torch.bfloat16),
             ),
         ), patch(
-            "rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_fp4_indexer.gather_k",
+            "rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_fp4_indexer.PpuFP4Indexer._gather_k",
             return_value=(gathered_k, gathered_scale),
         ) as gather, patch(
-            "rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_fp4_indexer.topk_bf16",
+            "rtp_llm.models_py.modules.dsv4.ppu.attention.ppu_fp4_indexer.PpuFP4Indexer._topk_prefill",
             side_effect=fake_topk,
         ):
             result = indexer.forward(x, qr, meta, workspace=object())

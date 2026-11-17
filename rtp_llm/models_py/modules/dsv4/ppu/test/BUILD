@@ -65,7 +65,7 @@ py_test(
         "@//:using_ppu": [],
         "//conditions:default": ["@platforms//:incompatible"],
     }),
-) for name in ["mega_moe_contract", "mtp_input", "decode_metadata_graph", "decode_state_slots"]]
+) for name in ["mega_moe_contract", "mtp_input", "decode_metadata_graph", "decode_state_slots", "fp8_indexer"]]
 
 py_test(
     name = "decode_fusions_test",
@@ -99,7 +99,7 @@ py_test(
     name = "indexer_cache_test",
     srcs = ["test_indexer_cache.py"],
     main = "test_indexer_cache.py",
-    data = ["//rtp_llm/models_py:modules/dsv4/ppu/metadata/cache.py"],
+    data = ["//rtp_llm/models_py:modules/dsv4/ppu/metadata/cache.py", "//rtp_llm/models_py:modules/dsv4/ppu/manifest.py"],
 )
 
 py_test(

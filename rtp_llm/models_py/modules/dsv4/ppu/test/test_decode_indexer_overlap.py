@@ -64,15 +64,14 @@ class DecodeIndexerGpuTest(unittest.TestCase):
                 indexer = SimpleNamespace(
                     compressor=SimpleNamespace(forward_decode_vectorized=compressor),
                     _compute_indexer_q=query,
+                    _quantize_q=quantize,
                     n_heads=64,
                     weights_proj=None,
                     weight_scale=1.0,
                     freqs_cis=torch.ones(1, 32, dtype=torch.complex64, device="cuda"),
                 )
                 outer.wait_stream(producer)
-                with patch(module + ".F.linear", side_effect=weights), patch(
-                    module + ".quantize_q", side_effect=quantize
-                ), torch.cuda.stream(outer):
+                with patch(module + ".F.linear", side_effect=weights), torch.cuda.stream(outer):
                     with self.assertRaisesRegex(RuntimeError, "injected " + failure):
                         prepare_decode_indexer_overlap(
                             indexer,

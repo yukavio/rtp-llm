@@ -19,22 +19,36 @@ class IndexerCacheTest(unittest.TestCase):
             "rtp_llm.ops": NS(OpaqueBlockEntryCountMode=NS(EXPLICIT="explicit")),
         }):
             spec.loader.exec_module(module)
+        manifest_spec = importlib.util.spec_from_file_location(
+            "cache_manifest", Path(__file__).parents[1] / "manifest.py")
+        manifest = importlib.util.module_from_spec(manifest_spec)
+        manifest_spec.loader.exec_module(manifest)
+        stub = patch.dict(sys.modules, {
+            "rtp_llm.models_py.modules.dsv4.ppu.manifest": manifest,
+        })
+        stub.start()
+        self.addCleanup(stub.stop)
         for gamma, expected in ((0, 8), (1, 12), (2, 12), (3, 12)):
             indexer = NS(tag="indexer_kv", entry_elems=132)
             state = NS(tag="indexer_state", state_ring_overlap=1,
                        compression_ratio=4, state_ring_include_gen_num_per_cycle=True)
             other = NS(tag="csa_state", entry_elems=2048)
             config = NS(gen_num_per_cycle=gamma, kv_cache_spec_descs=[[indexer, state, other]])
-            module.configure_indexer_cache(config)
+            module.configure_indexer_cache(config, {})
             self.assertEqual(indexer.entry_elems, 68)
             self.assertEqual(state.entry_count_mode, "explicit")
             self.assertEqual(state.explicit_entry_count, expected)
             self.assertEqual(vars(other), {"tag": "csa_state", "entry_elems": 2048})
-            module.configure_indexer_cache(config)
+            module.configure_indexer_cache(config, {})
             self.assertEqual(state.explicit_entry_count, expected)
+        module.configure_indexer_cache(config, {"DSV4_PPU_INDEXER_DTYPE": "fp8"})
+        self.assertEqual(indexer.entry_elems, 132)
+        self.assertEqual(state.explicit_entry_count, expected)
+        with self.assertRaises(ValueError):
+            module.configure_indexer_cache(config, {"DSV4_PPU_INDEXER_DTYPE": "fp16"})
         config.gen_num_per_cycle = -1
         with self.assertRaises(ValueError):
-            module.configure_indexer_cache(config)
+            module.configure_indexer_cache(config, {})
 
 
 if __name__ == "__main__":

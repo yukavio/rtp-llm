@@ -16,9 +16,12 @@ from rtp_llm.models_py.kernels.ppu.attention.ppu_inverse_rope import inverse_rop
 
 
 class PpuFP4Compressor(CompressorFP8):
+    CACHE_ENTRY_BYTES = 68
+    _norm_rope_store = staticmethod(norm_rope_store)
+
     def try_forward_decode_queries(self, x, meta):
         """Use one warp per request for chronological MTP C4 state updates."""
-        if not getattr(self, "_fuse_decode_queries", False):
+        if self.CACHE_ENTRY_BYTES != 68 or not getattr(self, "_fuse_decode_queries", False):
             return False
         if self._state_pool_3d is None or self._kv_pool_view is None:
             return False
@@ -46,7 +49,7 @@ class PpuFP4Compressor(CompressorFP8):
         super().__init__(*args, compressor_weights=compressor_weights, **kwargs)
         if (self.head_dim, self.rope_head_dim, self.compress_ratio) != (128, 64, 4):
             raise ValueError("FP4 Indexer compressor requires head128/rope64/C4")
-        self._pool_entry_bytes = 68
+        self._pool_entry_bytes = self.CACHE_ENTRY_BYTES
         self.norm.weight = torch.nn.Parameter(
             compressor_weights["norm"].float().contiguous(), requires_grad=False
         )
@@ -83,7 +86,7 @@ class PpuFP4Compressor(CompressorFP8):
             compressed = compress4(self._state_pool_3d, fused, self.ape, c, w)
         freqs = torch.view_as_real(self.freqs_cis).flatten(-2)
         with record_function_range("dsv4.ppu.fp4.indexer.norm_rope_store"):
-            norm_rope_store(
+            self._norm_rope_store(
                 compressed,
                 c,
                 self.norm.weight,
@@ -109,7 +112,7 @@ class PpuFP4Compressor(CompressorFP8):
         plan, slots = build_decode_plan(
             meta, self._state_block_table, self._state_eb, self._state_tokens_per_block
         )
-        if getattr(self, "_fuse_decode_store", False):
+        if self.CACHE_ENTRY_BYTES == 68 and getattr(self, "_fuse_decode_store", False):
             from rtp_llm.models_py.kernels.ppu.jit.ppu_fp4_indexer import compress4_decode_store
 
             if compress4_decode_store(
@@ -126,7 +129,7 @@ class PpuFP4Compressor(CompressorFP8):
             ):
                 return
         compressed = compress4_decode(self._state_pool_3d, fused, self.ape, plan)
-        norm_rope_store(
+        self._norm_rope_store(
             compressed,
             plan,
             self.norm.weight,
@@ -141,6 +144,12 @@ class PpuFP4Compressor(CompressorFP8):
 
 class PpuFP4Indexer(IndexerFP8):
     CACHE_ENTRY_BYTES = 68
+    QUERY_BYTES = 64
+    _compressor_factory = PpuFP4Compressor
+    _quantize_q = staticmethod(quantize_q)
+    _gather_k = staticmethod(gather_k)
+    _topk_prefill = staticmethod(topk_bf16)
+    _score_symbol = "fp8_fp4_mqa_logits"
     _request_local_scoring = True
     _batch_mtp_queries = False
 
@@ -148,18 +157,31 @@ class PpuFP4Indexer(IndexerFP8):
         super().__init__(
             *args,
             layer_weights=layer_weights,
-            compressor_factory=PpuFP4Compressor,
+            compressor_factory=self._compressor_factory,
             **kwargs,
         )
         import deep_gemm
 
-        if not callable(getattr(deep_gemm, "fp8_fp4_mqa_logits", None)):
-            raise RuntimeError("PPU DeepGEMM FP4 MQA is required")
-        self._score = deep_gemm.fp8_fp4_mqa_logits
+        if not callable(getattr(deep_gemm, self._score_symbol, None)):
+            raise RuntimeError(f"PPU DeepGEMM {self._score_symbol} is required")
+        self._score = getattr(deep_gemm, self._score_symbol)
         self.weights_proj = (
             layer_weights[W.v4_indexer_weights_proj_w].to(torch.bfloat16).contiguous()
         )
         self.weight_scale = self.softmax_scale * self.n_heads**-0.5
+
+    def _prefill_score(self, q, qs, k, ks, weights, starts, ends):
+        return self._score(
+            (q, qs), (k, ks), weights, starts, ends,
+            clean_logits=False, logits_dtype=torch.bfloat16,
+        )
+
+    def _paged_score(self, q, qs, weights, table, lengths, width):
+        return paged_score(
+            q.reshape(-1, 1, self.n_heads, self.QUERY_BYTES),
+            qs.reshape(-1, 1, self.n_heads), weights,
+            self._kv_pool_view, table, lengths, width,
+        )
 
     def forward(
         self,
@@ -198,7 +220,7 @@ class PpuFP4Indexer(IndexerFP8):
                 )
             with record_function_range("dsv4.ppu.fp4.indexer.weights_quant_q"):
                 weights = F.linear(x.reshape(meta.M, -1), self.weights_proj)
-                q, qs, weights = quantize_q(
+                q, qs, weights = self._quantize_q(
                     q,
                     weights,
                     self.weight_scale,
@@ -206,7 +228,7 @@ class PpuFP4Indexer(IndexerFP8):
                     meta.compressor_meta.positions,
                 )
             with record_function_range("dsv4.ppu.fp4.indexer.gather_k"):
-                k, ks = gather_k(
+                k, ks = self._gather_k(
                     self._kv_pool_view,
                     meta.block_table_i32,
                     meta.cu_kv_seqlens,
@@ -232,17 +254,13 @@ class PpuFP4Indexer(IndexerFP8):
                     local_ks = meta.ks[start:end] - k_begin
                     local_ke = meta.ke[start:end] - k_begin
                     with record_function_range("dsv4.ppu.fp4.indexer.score"):
-                        logits = self._score(
-                            (q[start:end], qs[start:end]),
-                            (request_k, request_k_scale),
-                            weights[start:end],
-                            local_ks,
-                            local_ke,
-                            clean_logits=False,
-                            logits_dtype=torch.bfloat16,
+                        logits = self._prefill_score(
+                            q[start:end], None if qs is None else qs[start:end],
+                            request_k, request_k_scale, weights[start:end],
+                            local_ks, local_ke,
                         )
                     with record_function_range("dsv4.ppu.fp4.indexer.topk"):
-                        topk_bf16(logits, local_ks, local_ke, out[start:end])
+                        self._topk_prefill(logits, local_ks, local_ke, out[start:end])
                     del logits
             return out.view(*x.shape[:-1], self.index_topk)
         finally:
@@ -349,7 +367,7 @@ class PpuFP4Indexer(IndexerFP8):
             q = self._compute_indexer_q(qr, None, apply_rope=False)
             q = q.reshape(tokens, self.n_heads, 128).contiguous()
             weights = F.linear(x.reshape(tokens, -1), self.weights_proj)
-            q, qs, weights = quantize_q(
+            q, qs, weights = self._quantize_q(
                 q,
                 weights,
                 self.weight_scale,
@@ -386,15 +404,7 @@ class PpuFP4Indexer(IndexerFP8):
             table = table.repeat_interleave(width, dim=0).contiguous()
             capacity = table.shape[1] * self._kv_eb
             score_width = max(32, min(capacity, self._kv_cache_t or capacity))
-            logits = paged_score(
-                q.reshape(tokens, 1, self.n_heads, 64),
-                qs.reshape(tokens, 1, self.n_heads),
-                weights,
-                self._kv_pool_view,
-                table,
-                lengths,
-                score_width,
-            )
+            logits = self._paged_score(q, qs, weights, table, lengths, score_width)
             topk_decode(
                 logits.reshape(tokens, score_width),
                 lengths.reshape(tokens),
@@ -460,7 +470,7 @@ class PpuFP4Indexer(IndexerFP8):
                     .contiguous()
                 )
                 weights = F.linear(x.reshape(bsz, -1), self.weights_proj)
-                q, qs, weights = quantize_q(
+                q, qs, weights = self._quantize_q(
                     q,
                     weights,
                     self.weight_scale,
@@ -474,15 +484,7 @@ class PpuFP4Indexer(IndexerFP8):
             table = self._kv_block_table[:bsz].to(torch.int32).contiguous()
             capacity = table.shape[1] * self._kv_eb
             width = max(32, min(capacity, self._kv_cache_t or capacity))
-            logits = paged_score(
-                q.reshape(bsz, 1, self.n_heads, 64),
-                qs.reshape(bsz, 1, self.n_heads),
-                weights,
-                self._kv_pool_view,
-                table,
-                lengths,
-                width,
-            )
+            logits = self._paged_score(q, qs, weights, table, lengths, width)
             topk_decode(
                 logits.reshape(bsz, width),
                 lengths.reshape(bsz),
@@ -535,6 +537,7 @@ class PpuFP4Attention(AttentionFP8):
         decode_indexer_mode="sequential",
         decode_mtp_overlap=False,
         decode_mtp_batch_indexer=False,
+        indexer_factory=PpuFP4Indexer,
         **kwargs,
     ):
         if decode_qkv_mode not in ("separate", "merged"):
@@ -546,7 +549,7 @@ class PpuFP4Attention(AttentionFP8):
             raise ValueError("PPU Decode Indexer must be sequential or overlap")
         if decode_indexer_mode == "overlap" and decode_stream_pool is None:
             raise ValueError("PPU Indexer overlap requires model-owned streams")
-        super().__init__(*args, indexer_factory=PpuFP4Indexer, **kwargs)
+        super().__init__(*args, indexer_factory=indexer_factory, **kwargs)
         if self.indexer is not None:
             self.indexer._batch_mtp_queries = bool(decode_mtp_batch_indexer)
         self._decode_streams = None

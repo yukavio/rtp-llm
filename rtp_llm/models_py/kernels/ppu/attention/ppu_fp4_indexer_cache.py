@@ -191,6 +191,7 @@ def _gather(
     BT_STRIDE: tl.constexpr,
     EB: tl.constexpr,
     BLOCK: tl.constexpr,
+    PAYLOAD: tl.constexpr = 64,
 ):
     t = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     live = t < T
@@ -204,14 +205,14 @@ def _gather(
         local = tl.where(here, t - begin, local)
     physical = tl.load(BT + req * BT_STRIDE + local // EB, live, 0)
     slot = local % EB
-    d = tl.arange(0, 64)
+    d = tl.arange(0, PAYLOAD)
     payload = tl.load(
-        CACHE + physical[:, None] * (EB * 68) + slot[:, None] * 64 + d[None, :],
+        CACHE + physical[:, None] * (EB * (PAYLOAD + 4)) + slot[:, None] * PAYLOAD + d[None, :],
         live[:, None],
         0,
     )
-    tl.store(K + t[:, None] * 64 + d[None, :], payload, live[:, None])
-    sfbase = CACHE + physical * (EB * 68) + EB * 64 + slot * 4
+    tl.store(K + t[:, None] * PAYLOAD + d[None, :], payload, live[:, None])
+    sfbase = CACHE + physical * (EB * (PAYLOAD + 4)) + EB * PAYLOAD + slot * 4
     scale = tl.full((BLOCK,), 0, tl.uint32)
     for j in tl.static_range(4):
         byte = tl.load(sfbase + j, live, 0).to(tl.uint32)

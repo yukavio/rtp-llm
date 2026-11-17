@@ -3,8 +3,6 @@
 import torch
 import torch.nn.functional as F
 
-from rtp_llm.models_py.kernels.ppu.jit.ppu_fp4_indexer import quantize_q
-
 
 def prepare_decode_indexer_overlap(
     indexer, x, qr, start_pos, position_ids, metadata, q_producer_stream, streams
@@ -47,7 +45,7 @@ def prepare_decode_indexer_overlap(
                 .reshape(batch, indexer.n_heads, 128)
                 .contiguous()
             )
-            q, scales, weights = quantize_q(
+            q, scales, weights = indexer._quantize_q(
                 q,
                 weights,
                 indexer.weight_scale,
@@ -59,5 +57,6 @@ def prepare_decode_indexer_overlap(
         current.wait_stream(weight_stream)
     if not capturing:
         for tensor in (q, scales, weights):
-            tensor.record_stream(current)
+            if tensor is not None:
+                tensor.record_stream(current)
     return q, scales, weights

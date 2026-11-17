@@ -12,7 +12,6 @@ from rtp_llm.models_py.modules.dsv4.ppu.ppu_module_provider import PpuModuleProv
 
 class PpuDecodeProvider(PpuModuleProvider):
     name = "m890p-dsv4-fp4-decode-candidate"
-    indexer_mode = "FP4"
     _moe_hint = "capacity"
     _moe_output_dtype = torch.bfloat16
 

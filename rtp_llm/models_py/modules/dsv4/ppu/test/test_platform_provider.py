@@ -73,6 +73,25 @@ class PlatformProviderTest(unittest.TestCase):
             with self.assertRaises(TypeError):
                 provider.build_attention(None, platform_provider=object())
 
+    def test_fp8_indexer_selection_is_instance_owned(self):
+        options = {"DSV4_PPU_INDEXER_DTYPE": "fp8"}
+        provider = self.module.PpuModuleProvider(options)
+        options["DSV4_PPU_INDEXER_DTYPE"] = "fp4"
+        ctor, commit, indexer = Mock(), Mock(), object()
+        with patch.dict(sys.modules, {
+            PREFIX + ".attention.fp8.attention": SimpleNamespace(CommitOnlyAttentionFP8=commit),
+            PREFIX + ".attention.ppu_fp4_indexer": SimpleNamespace(PpuFP4Attention=ctor),
+            PREFIX + ".attention.ppu_fp8_indexer": SimpleNamespace(PpuFP8Indexer=indexer),
+        }):
+            provider.build_attention(None, 7)
+            ctor.assert_called_once_with(7, platform_provider=provider, indexer_factory=indexer)
+            provider.build_attention(commit, 7)
+            commit.assert_called_once_with(7, platform_provider=provider)
+        self.assertEqual(provider.indexer_mode, "FP8")
+        self.assertEqual(self.module.PpuModuleProvider({}).indexer_mode, "FP4")
+        with self.assertRaises(ValueError):
+            self.module.PpuModuleProvider({"DSV4_PPU_INDEXER_DTYPE": "fp16"})
+
     def test_prefill_and_decode_keep_metadata_and_optional_fusion_contracts(self):
         prefill = self.module.PpuModuleProvider({})
         decode = self.decode.PpuDecodeProvider(self.manifest.DECODE_EXECUTION_OPTIONS)

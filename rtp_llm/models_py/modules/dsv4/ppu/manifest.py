@@ -55,6 +55,14 @@ def validate_cache_config(kv_cache_config):
 DRAFT_LAYERS = {"deepseek_v4_mtp": 1, "deepseek_v4_dspark": 3}
 
 
+def resolve_indexer_mode(options=None):
+    options = os.environ if options is None else options
+    mode = options.get("DSV4_PPU_INDEXER_DTYPE", "fp4")
+    if mode not in ("fp4", "fp8"):
+        raise ValueError("DSV4_PPU_INDEXER_DTYPE must be fp4 or fp8")
+    return mode.upper()
+
+
 def build_provider(model_config, parallelism, moe_config, max_generate_batch_size):
     from rtp_llm.ops import KvCacheDataType
 
@@ -87,7 +95,7 @@ def build_provider(model_config, parallelism, moe_config, max_generate_batch_siz
     if role == "DECODE" and parallelism.ep_size == 1:
         raise ValueError("PPU DSV4 Decode requires EP=world_size>1")
     if model_config.attn_config.kv_cache_dtype != KvCacheDataType.FP8:
-        raise ValueError("PPU DSV4 requires FP8 KV and FP4 indexer cache")
+        raise ValueError("PPU DSV4 requires FP8 attention KV cache")
     if (model_config.attn_config.kernel_tokens_per_block != 256
             or model_config.attn_config.tokens_per_block != 256):
         raise ValueError("PPU DSV4 requires matching 256-token physical and kernel blocks")
